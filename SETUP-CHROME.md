@@ -58,9 +58,11 @@ PASSO 0. Verificação inicial (só ler)
 - Abre https://marcaserio.pt e anota o que aparece.
 - Na Cloudflare, abre a zona marcaserio.pt → DNS → Records. Anota o registo A de
   marcaserio.pt (valor e proxy) e diz-me se já existe algum registo "eventos".
-- Na consola do Google Cloud, seleciona o projeto "website-marcaserio-pt". Diz-me o ID do
-  projeto, se a faturação está ativa e se já existe algum serviço Cloud Run ou base de dados
-  Firestore chamado "marcaserio-eventos". Se existir, para e pergunta-me.
+- Na consola do Google Cloud, seleciona o projeto "website-marcaserio-pt". Diz-me:
+  com que conta Google estás a trabalhar (canto superior direito) e se ela tem o papel
+  "Owner" no projeto (IAM & Admin → IAM, só ler); o ID do projeto; se a faturação está
+  ativa; e se já existe algum serviço Cloud Run ou base de dados Firestore chamado
+  "marcaserio-eventos". Se existir, ou se a conta não for Owner, para e pergunta-me.
 - Pede-me confirmação para avançar.
 
 PASSO 1. Código no Cloud Shell
