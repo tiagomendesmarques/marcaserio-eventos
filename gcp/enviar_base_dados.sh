@@ -15,7 +15,7 @@ python3 -c "import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connec
 read -r -p "Substituir a base de dados do servidor por $DB? (escreve SIM) " OK
 [ "$OK" = "SIM" ] || exit 1
 
-gcloud compute scp --zone "$ZONE" "$COPY" "$VM":/tmp/marcaserio_upload.sqlite3
+scp_vm "$COPY" "$VM":/tmp/marcaserio_upload.sqlite3
 ssh_vm 'set -e; D=/var/lib/marcaserio; sudo systemctl stop marcaserio-checkin
   if [ -f $D/marcaserio_checkin.sqlite3 ]; then
     sudo -u marcaserio mkdir -p $D/copias_seguranca

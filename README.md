@@ -13,6 +13,7 @@ Python 3, sem dependências externas.
 | `web/` | Interface (HTML, CSS e JS) |
 | `agente_impressao.py` | Agente que imprime as etiquetas da versão online no Mac do evento |
 | `gcp/` | Scripts de instalação no Google Cloud |
+| `SETUP-CHROME.md` | Prompt para instalar tudo com o Claude in Chrome |
 
 O bloco de impressão Direct Protocol (`ascii_text`, `badge_layout`, `dp_commands`, `print_badge`)
 está preservado literalmente da v2.6 aprovada. Não alterar sem testar na impressora.

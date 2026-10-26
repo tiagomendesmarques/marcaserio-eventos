@@ -37,6 +37,7 @@ web/                            interface (index.html, app.css, app.js, logo)
 agente_impressao.py             versão online: imprime no Mac do evento
 Abrir_Agente_Impressao.command  abre o agente de impressão
 gcp/                            scripts de instalação no Google Cloud + Cloudflare
+SETUP-CHROME.md                 instalação guiada com o Claude in Chrome
 
 Guarda uma cópia de segurança de marcaserio_checkin.sqlite3 regularmente.
 
