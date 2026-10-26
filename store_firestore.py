@@ -3,7 +3,9 @@
 Estrutura (base de dados própria, separada de qualquer outra do projeto):
 
   settings/{chave}                                  {value}
-  events/{evento}                                   nome, data, password_hash, list_version, …
+  users/{email}                                     perfil, palavra-passe (hash), eventos, …
+  audit/{id}                                        registos (apagados ao fim de 12 meses, por TTL)
+  events/{evento}                                   nome, data, list_version, …
   events/{evento}/lists/{versão}                    {created_at, count}
   events/{evento}/lists/{versão}/people/{pessoa}    nome, função, empresa, check-in, …
   events/{evento}/print_jobs/{etiqueta}             fila de impressão do evento
@@ -16,6 +18,7 @@ O check-in é uma transação: duas hospedeiras ao mesmo participante, ganha uma
 import hashlib
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from google.api_core.exceptions import Conflict
 from google.cloud import firestore
@@ -25,6 +28,7 @@ from store_sqlite import AlreadyCheckedIn, now
 
 BATCH = 400               # máximo de 500 operações por lote no Firestore
 HEARTBEAT_INTERVAL = 15   # segundos entre registos de contacto do agente (por contentor)
+AUDIT_RETENTION = timedelta(days=365)  # campo expire_at, usado pela política de TTL
 
 
 def _count(query):
@@ -32,9 +36,8 @@ def _count(query):
 
 
 class FirestoreStore:
-    def __init__(self, project, database, no_password):
+    def __init__(self, project, database):
         self.client = firestore.Client(project=project or None, database=database)
-        self.no_password = no_password
         self.heartbeats = {}  # event_id → último registo de contacto feito por este contentor
 
     def init(self):
@@ -85,7 +88,6 @@ class FirestoreStore:
         for e in self._events():
             people = self._people(e)
             result.append({'id': e['id'], 'name': e['name'], 'event_date': e.get('event_date', ''),
-                           'has_password': e['password_hash'] != self.no_password,
                            'total': _count(people),
                            'checked': _count(people.where(filter=FieldFilter('checked', '==', True)))})
         return result
@@ -96,19 +98,36 @@ class FirestoreStore:
         snap = self._event_ref(event_id).get()
         return dict(snap.to_dict(), id=snap.id) if snap.exists else None
 
-    def create_event(self, name, event_date, password_hash, event_id=None, created_at=None):
+    def create_event(self, name, event_date, event_id=None, created_at=None):
         event_id = event_id or str(uuid.uuid4())
-        self._event_ref(event_id).set({'name': name, 'event_date': event_date, 'password_hash': password_hash,
-                                       'created_at': created_at or now(), 'list_version': 1,
-                                       'agent_seen_ts': 0, 'last_print_error': ''})
+        self._event_ref(event_id).set({'name': name, 'event_date': event_date, 'created_at': created_at or now(),
+                                       'list_version': 1, 'agent_seen_ts': 0, 'last_print_error': ''})
         return event_id
 
-    def set_event_password(self, event_id, password_hash):
-        ref = self._event_ref(event_id)
-        if not ref.get().exists:
-            return False
-        ref.update({'password_hash': password_hash})
-        return True
+    # ── utilizadores ──
+
+    def get_user(self, email):
+        snap = self.client.collection('users').document(email).get() if email else None
+        return dict(snap.to_dict(), email=snap.id) if snap and snap.exists else None
+
+    def list_users(self):
+        return sorted((dict(s.to_dict(), email=s.id) for s in self.client.collection('users').stream()), key=lambda u: u['email'])
+
+    def save_user(self, user):
+        data = {k: v for k, v in user.items() if k != 'email'}
+        self.client.collection('users').document(user['email']).set(data)
+
+    def delete_user(self, email):
+        self.client.collection('users').document(email).delete()
+
+    # ── registos ──
+
+    def log(self, entry):
+        self.client.collection('audit').add(dict(entry, expire_at=datetime.now(timezone.utc) + AUDIT_RETENTION))
+
+    def recent_logs(self, limit):
+        query = self.client.collection('audit').order_by('ts', direction=firestore.Query.DESCENDING).limit(limit)
+        return [{k: v for k, v in s.to_dict().items() if k != 'expire_at'} for s in query.stream()]
 
     # ── participantes ──
 
@@ -262,8 +281,7 @@ class FirestoreStore:
 
     def restore_event(self, event, people):
         """Copia um evento da base de dados SQLite (mesmo id, palavra-passe e check-ins)."""
-        self.create_event(event['name'], event['event_date'], event['password_hash'],
-                          event_id=event['id'], created_at=event['created_at'])
+        self.create_event(event['name'], event['event_date'], event_id=event['id'], created_at=event['created_at'])
         rows = []
         for p in people:
             row = self._new_person(p['name'], p['role'], p['company'], p['source'],

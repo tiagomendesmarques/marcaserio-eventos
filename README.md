@@ -1,6 +1,8 @@
 # marcAsério Check-in
 
 Acreditação de eventos com impressão de badges numa Honeywell PC42d (Direct Protocol).
+Contas com três perfis (administrador, editor e hospedeira), login com Google para @marcaserio.pt,
+e registos de entradas e alterações na zona **Gestão**.
 
 - **Local** (um Mac ligado à impressora; Python 3, sem dependências externas, dados em SQLite):
   `bash Abrir_marcAserio_CheckIn.command`. Ver [LEIA-ME.txt](LEIA-ME.txt).
@@ -9,7 +11,7 @@ Acreditação de eventos com impressão de badges numa Honeywell PC42d (Direct P
 
 | Ficheiro | Função |
 |---|---|
-| `marcaserio_checkin.py` | Servidor HTTP, API, sessões e impressão |
+| `marcaserio_checkin.py` | Servidor HTTP, API, contas, sessões, login com Google, registos e impressão |
 | `store_sqlite.py` | Dados em SQLite (versão local) |
 | `store_firestore.py` | Dados em Firestore (versão online) |
 | `web/` | Interface (HTML, CSS e JS) |

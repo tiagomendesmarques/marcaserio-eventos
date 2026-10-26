@@ -3,6 +3,7 @@
 Um só processo, por isso um cadeado (LOCK) chega para garantir que dois check-ins
 ao mesmo participante não passam os dois.
 """
+import json
 import secrets
 import sqlite3
 import threading
@@ -25,9 +26,10 @@ class AlreadyCheckedIn(ValueError):
 class SqliteStore:
     """Mesma interface que store_firestore.FirestoreStore."""
 
-    def __init__(self, db_path, legacy_db, backup_dir, no_password):
+    NO_PASSWORD = '!password-not-set!'  # coluna antiga (palavra-passe por evento), já sem uso
+
+    def __init__(self, db_path, legacy_db, backup_dir):
         self.db_path, self.legacy_db, self.backup_dir = db_path, legacy_db, backup_dir
-        self.no_password = no_password
         self.lock = threading.RLock()
         self.failures = {}     # IP → instantes das tentativas falhadas
         self.agents = {}       # event_id → último contacto do agente
@@ -73,6 +75,14 @@ class SqliteStore:
                 status TEXT NOT NULL DEFAULT 'pending', error TEXT NOT NULL DEFAULT '',
                 created_ts REAL NOT NULL, updated_ts REAL NOT NULL)''')
             db.execute('CREATE INDEX IF NOT EXISTS ix_jobs_event ON print_jobs(event_id, status, created_ts)')
+            db.execute('''CREATE TABLE IF NOT EXISTS users (
+                email TEXT PRIMARY KEY, role TEXT NOT NULL, password_hash TEXT NOT NULL DEFAULT '',
+                events TEXT NOT NULL DEFAULT '[]', sv INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+                created_by TEXT NOT NULL DEFAULT '', last_login TEXT NOT NULL DEFAULT '')''')
+            db.execute('''CREATE TABLE IF NOT EXISTS audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, at TEXT NOT NULL, actor TEXT NOT NULL,
+                action TEXT NOT NULL, event_id TEXT NOT NULL DEFAULT '', event_name TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT '')''')
             if 'event_id' not in {row['name'] for row in db.execute('PRAGMA table_info(people)')}:
                 db.execute('ALTER TABLE people ADD COLUMN event_id TEXT')
             db.execute('CREATE INDEX IF NOT EXISTS ix_people_event ON people(event_id)')
@@ -80,7 +90,7 @@ class SqliteStore:
             # Participantes antigos (sem evento) pertencem apenas ao evento original.
             if db.execute('SELECT 1 FROM people WHERE event_id IS NULL LIMIT 1').fetchone():
                 db.execute('INSERT OR IGNORE INTO events(id,name,event_date,password_hash,created_at) VALUES (?,?,?,?,?)',
-                           (LEGACY_EVENT_ID, 'People & Finance Forum 2026', '2026-10-15', self.no_password, now()))
+                           (LEGACY_EVENT_ID, 'People & Finance Forum 2026', '2026-10-15', self.NO_PASSWORD, now()))
                 db.execute('UPDATE people SET event_id=? WHERE event_id IS NULL', (LEGACY_EVENT_ID,))
 
     # ── definições ──
@@ -104,27 +114,59 @@ class SqliteStore:
 
     def list_events_with_stats(self):
         with self.db() as db:
-            rows = db.execute('''SELECT e.id, e.name, e.event_date, e.password_hash<>? AS has_password,
-                                        COUNT(p.id) AS total, COUNT(p.checked_at) AS checked
+            rows = db.execute('''SELECT e.id, e.name, e.event_date, COUNT(p.id) AS total, COUNT(p.checked_at) AS checked
                                  FROM events e LEFT JOIN people p ON p.event_id=e.id
-                                 GROUP BY e.id ORDER BY e.event_date DESC, e.name''', (self.no_password,))
-            return [dict(r, has_password=bool(r['has_password'])) for r in rows]
+                                 GROUP BY e.id ORDER BY e.event_date DESC, e.name''')
+            return [dict(r) for r in rows]
 
     def get_event(self, event_id):
         with self.db() as db:
             row = db.execute('SELECT * FROM events WHERE id=?', (event_id,)).fetchone()
         return dict(row, list_version=1) if row else None
 
-    def create_event(self, name, event_date, password_hash):
+    def create_event(self, name, event_date):
         event_id = str(uuid.uuid4())
         with self.lock, self.db() as db:
             db.execute('INSERT INTO events(id,name,event_date,password_hash,created_at) VALUES (?,?,?,?,?)',
-                       (event_id, name, event_date, password_hash, now()))
+                       (event_id, name, event_date, self.NO_PASSWORD, now()))
         return event_id
 
-    def set_event_password(self, event_id, password_hash):
+    # ── utilizadores ──
+
+    @staticmethod
+    def _user(row):
+        return dict(row, events=json.loads(row['events'])) if row else None
+
+    def get_user(self, email):
+        with self.db() as db:
+            return self._user(db.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone())
+
+    def list_users(self):
+        with self.db() as db:
+            return [self._user(r) for r in db.execute('SELECT * FROM users ORDER BY email')]
+
+    def save_user(self, user):
         with self.lock, self.db() as db:
-            return db.execute('UPDATE events SET password_hash=? WHERE id=?', (password_hash, event_id)).rowcount > 0
+            db.execute('INSERT OR REPLACE INTO users(email,role,password_hash,events,sv,created_at,created_by,last_login) '
+                       'VALUES (?,?,?,?,?,?,?,?)',
+                       (user['email'], user['role'], user['password_hash'], json.dumps(user['events']), user['sv'],
+                        user['created_at'], user['created_by'], user['last_login']))
+
+    def delete_user(self, email):
+        with self.lock, self.db() as db:
+            db.execute('DELETE FROM users WHERE email=?', (email,))
+
+    # ── registos ──
+
+    def log(self, entry):
+        with self.lock, self.db() as db:
+            db.execute('INSERT INTO audit(ts,at,actor,action,event_id,event_name,detail,ip) VALUES (?,?,?,?,?,?,?,?)',
+                       tuple(entry[k] for k in ('ts', 'at', 'actor', 'action', 'event_id', 'event_name', 'detail', 'ip')))
+
+    def recent_logs(self, limit):
+        with self.db() as db:
+            return [dict(r) for r in db.execute('SELECT ts,at,actor,action,event_id,event_name,detail,ip FROM audit '
+                                                'ORDER BY ts DESC LIMIT ?', (limit,))]
 
     # ── participantes ──
 

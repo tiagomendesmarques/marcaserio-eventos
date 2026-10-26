@@ -5,7 +5,7 @@ set -euo pipefail
 source "$(dirname "$0")/config.sh"
 
 gcloud services enable run.googleapis.com firestore.googleapis.com \
-  cloudbuild.googleapis.com artifactregistry.googleapis.com
+  cloudbuild.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com
 
 if gcloud firestore databases describe --database="$DATABASE" >/dev/null 2>&1; then
   echo "A base de dados Firestore $DATABASE já existe."
@@ -17,6 +17,10 @@ fi
 if [ -z "$(gcloud firestore backups schedules list --database="$DATABASE" --format='value(name)')" ]; then
   gcloud firestore backups schedules create --database="$DATABASE" --recurrence=daily --retention=14d
 fi
+
+# Registos (coleção audit) apagados automaticamente ao fim de 12 meses.
+gcloud firestore fields ttls update expire_at --collection-group=audit --enable-ttl \
+  --database="$DATABASE" --async --quiet >/dev/null 2>&1 || echo "A política de TTL dos registos já está ativa."
 
 if ! gcloud iam service-accounts describe "$SA" >/dev/null 2>&1; then
   gcloud iam service-accounts create "$SA_NAME" --display-name="marcAsério Check-in (Cloud Run)"

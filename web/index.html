@@ -9,70 +9,145 @@
 </head>
 <body>
 
-<!-- Entrada: escolha de evento, primeira configuração e administração -->
-<section id="auth" class="auth" hidden>
+<!-- Entrar: Google (contas @marcaserio.pt) ou email e palavra-passe -->
+<section id="login" class="auth" hidden>
   <div class="auth-card">
     <img class="logo" src="/logo.png" alt="marcAsério — The Marketing Powerhouse">
-    <h1 id="authTitle">Escolher evento</h1>
-    <p id="authIntro" class="muted">Escolhe o evento e introduz a respetiva palavra-passe.</p>
+    <h1 id="loginTitle">Entrar</h1>
+    <p id="loginIntro" class="muted">Entra com a tua conta para fazer check-ins.</p>
 
+    <a id="googleLogin" class="btn google block" href="/auth/google" hidden>
+      <svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.2-.1-2.3-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.3 0-9.7-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.2-.1-2.3-.4-3.5z"/></svg>
+      <span id="googleLabel">Entrar com Google</span>
+    </a>
+    <div id="loginDivider" class="divider" hidden><span>ou com email e palavra-passe</span></div>
+
+    <form id="loginForm" class="stack">
+      <label for="loginEmail">Email</label>
+      <input id="loginEmail" type="email" autocomplete="username" required>
+      <label for="loginPassword">Palavra-passe</label>
+      <input id="loginPassword" type="password" autocomplete="current-password" required>
+      <label for="loginPassword2" id="loginPassword2Label" hidden>Confirmar palavra-passe</label>
+      <input id="loginPassword2" type="password" autocomplete="new-password" hidden>
+      <button class="btn primary block" id="loginButton">Entrar</button>
+    </form>
+    <p id="loginStatus" class="status" role="status"></p>
+  </div>
+</section>
+
+<!-- Escolher o evento -->
+<section id="picker" class="auth" hidden>
+  <div class="auth-card">
+    <img class="logo" src="/logo.png" alt="marcAsério">
+    <div class="row between">
+      <h1>Escolher evento</h1>
+      <span class="tag" id="pickerRole"></span>
+    </div>
+    <p class="muted small" id="pickerUser"></p>
     <div id="eventList" class="event-list"></div>
-
-    <form id="eventLogin" class="stack" hidden>
-      <label for="eventPassword">Palavra-passe do evento</label>
-      <input id="eventPassword" type="password" autocomplete="off" required>
-      <button class="btn primary block">Entrar no evento</button>
-    </form>
-
-    <form id="setupAdmin" class="stack" hidden>
-      <label for="setupPassword">Criar palavra-passe de administração</label>
-      <input id="setupPassword" type="password" autocomplete="new-password" placeholder="Mínimo de 10 caracteres" required>
-      <label for="setupPassword2">Confirmar palavra-passe</label>
-      <input id="setupPassword2" type="password" autocomplete="new-password" required>
-      <button class="btn primary block">Configurar administração</button>
-    </form>
-
-    <p id="authStatus" class="status" role="status"></p>
-
-    <div id="adminSection" class="admin">
-      <button type="button" class="link" id="toggleAdmin">Administração de eventos</button>
-
-      <form id="adminLogin" class="stack" hidden>
-        <label for="adminPassword">Palavra-passe de administração</label>
-        <input id="adminPassword" type="password" autocomplete="off" required>
-        <button class="btn primary block">Entrar como administrador</button>
-      </form>
-
-      <div id="adminTools" hidden>
-        <div class="row between">
-          <h2>Gerir eventos</h2>
-          <button type="button" class="btn ghost small" id="adminLogout">Terminar sessão</button>
-        </div>
-        <div id="adminEventList" class="admin-events"></div>
-
-        <form id="createEvent" class="create-event">
-          <h3>Novo evento</h3>
-          <div class="grid2">
-            <div class="wide">
-              <label for="eventName">Nome do evento</label>
-              <input id="eventName" placeholder="Ex.: Well-Being Lisboa 2027" required>
-            </div>
-            <div>
-              <label for="eventDate">Data (opcional)</label>
-              <input id="eventDate" type="date">
-            </div>
-            <div>
-              <label for="newEventPassword">Palavra-passe do evento</label>
-              <input id="newEventPassword" type="password" autocomplete="new-password" placeholder="Mínimo de 8 caracteres" required>
-            </div>
-          </div>
-          <button class="btn primary block">Criar evento</button>
-          <p class="note">As hospedeiras só podem aceder ao evento cuja palavra-passe conhecem.</p>
-        </form>
-      </div>
+    <p id="pickerStatus" class="status" role="status"></p>
+    <div class="row between picker-actions">
+      <button type="button" class="btn" id="openManage" hidden>⚙ Gestão</button>
+      <button type="button" class="btn ghost" id="logoutPicker">Terminar sessão</button>
     </div>
   </div>
 </section>
+
+<!-- Gestão: eventos, utilizadores e registos (administradores e editores) -->
+<main id="manage" class="manage" hidden>
+  <header class="topbar">
+    <div class="brand">
+      <img class="logo" src="/logo.png" alt="marcAsério">
+      <div>
+        <h1>Gestão</h1>
+        <p class="muted" id="manageUser"></p>
+      </div>
+    </div>
+    <div class="row">
+      <button type="button" class="btn" id="manageBack">← Eventos</button>
+      <button type="button" class="btn ghost" id="logoutManage">Terminar sessão</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button type="button" class="tab active" data-tab="tabEvents">Eventos</button>
+    <button type="button" class="tab" data-tab="tabUsers">Utilizadores</button>
+    <button type="button" class="tab" data-tab="tabLogs" id="logsTab" hidden>Registos</button>
+  </nav>
+  <p id="manageStatus" class="status" role="status"></p>
+
+  <section id="tabEvents" class="tab-panel">
+    <div class="layout">
+      <section class="panel">
+        <h2>Eventos</h2>
+        <div id="manageEvents" class="rows"></div>
+      </section>
+      <section class="panel">
+        <h2>Novo evento</h2>
+        <form id="createEvent">
+          <label for="eventName">Nome do evento</label>
+          <input id="eventName" placeholder="Ex.: Well-Being Lisboa 2027" required>
+          <label for="eventDate">Data (opcional)</label>
+          <input id="eventDate" type="date">
+          <button class="btn primary block spaced">Criar evento</button>
+        </form>
+      </section>
+    </div>
+  </section>
+
+  <section id="tabUsers" class="tab-panel" hidden>
+    <div class="layout">
+      <section class="panel">
+        <div class="row between">
+          <h2>Utilizadores</h2>
+          <input type="search" class="search compact" id="userSearch" placeholder="Pesquisar email…" autocomplete="off">
+        </div>
+        <p class="note" id="usersNote"></p>
+        <div id="userList" class="rows"></div>
+      </section>
+      <section class="panel">
+        <div class="row between">
+          <h2 id="userFormTitle">Convidar utilizador</h2>
+          <button type="button" class="btn ghost small" id="userFormReset" hidden>Novo</button>
+        </div>
+        <form id="userForm" autocomplete="off">
+          <label for="userEmail">Email</label>
+          <input id="userEmail" type="email" required>
+          <label for="userRole">Perfil</label>
+          <select id="userRole" class="block"></select>
+          <p class="note" id="roleHelp"></p>
+          <div id="userEventsBox">
+            <label>Eventos a que tem acesso</label>
+            <div id="userEvents" class="checks"></div>
+          </div>
+          <label for="userPassword" id="userPasswordLabel">Palavra-passe</label>
+          <input id="userPassword" type="text" autocomplete="new-password" placeholder="Mínimo de 8 caracteres">
+          <p class="note" id="passwordHelp"></p>
+          <button class="btn primary block spaced" id="userSave">Criar utilizador</button>
+        </form>
+      </section>
+    </div>
+  </section>
+
+  <section id="tabLogs" class="tab-panel" hidden>
+    <section class="panel">
+      <div class="row between">
+        <h2>Registos</h2>
+        <div class="row">
+          <input type="search" class="search compact" id="logSearch" placeholder="Filtrar por pessoa, ação, evento…" autocomplete="off">
+          <button type="button" class="btn small" id="logsReload">Atualizar</button>
+        </div>
+      </div>
+      <p class="note" id="logsNote"></p>
+      <div class="table-wrap">
+        <table class="logs">
+          <thead><tr><th>Quando</th><th>Quem</th><th>Ação</th><th>Evento</th><th>Detalhe</th></tr></thead>
+          <tbody id="logRows"></tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+</main>
 
 <!-- Evento: lista de participantes, edição e impressão -->
 <main id="app" hidden>
@@ -86,7 +161,8 @@
     </div>
     <div class="row">
       <span class="pill" id="printer"><i class="dot"></i><span id="printerText">Honeywell PC42d · Direct Protocol</span></span>
-      <button type="button" class="btn" id="leaveEvent">Sair do evento</button>
+      <button type="button" class="btn" id="leaveEvent">← Eventos</button>
+      <button type="button" class="btn ghost" id="logoutApp" title="">Terminar sessão</button>
     </div>
   </header>
 
@@ -117,25 +193,23 @@
       <div id="list" class="list"></div>
 
       <details id="importBox" class="drawer">
-        <summary>Importar inscrições</summary>
+        <summary id="importSummary">Importar inscrições</summary>
         <p class="note">Aceita .xlsx e .csv com colunas Nome, Função e Empresa (também reconhece variantes comuns).
-          Os dados são guardados neste Mac. Importações adicionais não apagam os check-ins existentes.</p>
-        <form id="importForm" class="row">
+          Importações adicionais não apagam os check-ins existentes.</p>
+        <form id="importForm" class="row editor-only">
           <input type="file" id="file" accept=".xlsx,.csv,text/csv" required>
           <button class="btn primary">Importar lista</button>
         </form>
         <a class="btn" href="/api/export" download>Exportar CSV com check-ins</a>
 
-        <div class="replace">
-          <h3>Lista definitiva · Administração</h3>
+        <div class="replace editor-only">
+          <h3>Lista definitiva</h3>
           <p class="note">Substitui <strong>apenas os participantes deste evento</strong>. Elimina também os check-ins
             atuais deste evento. Antes da substituição, é criada uma cópia de segurança automática.</p>
           <button type="button" class="btn danger" id="toggleReplace">Substituir lista de participantes</button>
           <form id="replaceForm" class="stack" hidden>
             <label for="replacementFile">Nova lista definitiva (.xlsx ou .csv)</label>
             <input type="file" id="replacementFile" accept=".xlsx,.csv,text/csv" required>
-            <label for="replaceAdminPassword">Palavra-passe de administração</label>
-            <input type="password" id="replaceAdminPassword" autocomplete="off" placeholder="Obrigatória para substituir" required>
             <button class="btn danger">Confirmar substituição</button>
           </form>
         </div>

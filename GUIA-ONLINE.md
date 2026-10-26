@@ -42,6 +42,7 @@ Só corre quando alguém a está a usar.
 | Conta de serviço | `marcaserio-eventos@<projeto>.iam.gserviceaccount.com`, só com acesso à base de dados acima |
 | Imagens do contentor | Artifact Registry `marcaserio-eventos` (deploys do GitHub, guarda as 10 últimas) e `cloud-run-source-deploy` (deploys manuais) |
 | Deploy pelo GitHub | Conta `marcaserio-deployer`, *pool* de Workload Identity `github` e *provider* `marcaserio-eventos` |
+| Login com Google | Cliente OAuth «marcAsério Check-in» e os segredos `marcaserio-google-client-id` / `-secret` (Secret Manager, `europe-west1`) |
 
 Nada do que já existe no projeto é alterado.
 
@@ -64,6 +65,32 @@ Fica tipicamente em **cêntimos por mês**:
 
 Confirma em https://cloud.google.com/products/calculator.
 
+## Contas e acessos
+
+Cada pessoa entra com a sua conta. Não há palavras-passe partilhadas por evento.
+
+| Perfil | Como entra | O que pode fazer |
+|---|---|---|
+| **Administrador** | Google (@marcaserio.pt) ou email e palavra-passe | Tudo: utilizadores e perfis, eventos, listas e registos |
+| **Editor** | Google (@marcaserio.pt) ou email e palavra-passe | Eventos, importar e substituir listas, check-ins em todos os eventos, convidar hospedeiras |
+| **Hospedeira** | Email e palavra-passe | Só check-ins (e exportar o CSV) nos eventos a que foi atribuída |
+
+- **Administradores de raiz:** `tiago.marques@marcaserio.pt` e `miguel.romao@marcaserio.pt`. Entram
+  logo como administradores no primeiro login com o Google. A lista vem de `MA_ADMINS`.
+- **Outras contas @marcaserio.pt:** no primeiro login com o Google ficam como **editores**.
+  Um administrador pode depois mudar-lhes o perfil.
+- **Só entram contas da organização Google Workspace da marcaserio.pt.** A app verifica o campo
+  `hd` que o Google devolve, não apenas o final do email.
+- **Hospedeiras:** são convidadas em **Gestão → Utilizadores**, com email, palavra-passe e eventos.
+  Envia-lhes os dados; podem entrar logo. Com um só evento atribuído, entram diretamente nele.
+- **Mudar a palavra-passe de alguém termina as sessões abertas dessa pessoa.** Retirar-lhe um evento
+  ou removê-la tira o acesso de imediato.
+- **Registos:** em **Gestão → Registos**, só para administradores. Ficam lá as entradas, incluindo as
+  falhadas, as saídas, as alterações a utilizadores, os eventos criados, as importações, as
+  substituições e exportações, os check-ins, anulações, edições e reimpressões, e os erros de
+  impressão. Cada registo guarda quem, quando, o evento, o detalhe e o IP. São apagados
+  automaticamente ao fim de 12 meses.
+
 ## Instalação
 
 Corre todos os comandos no **Cloud Shell** do projeto: o ícone `>_` na consola do Google Cloud.
@@ -72,11 +99,29 @@ O [SETUP-CHROME.md](SETUP-CHROME.md) faz tudo isto com o Claude in Chrome.
 ```bash
 git clone <este repositório> ~/marcaserio-eventos && cd ~/marcaserio-eventos
 
-bash gcp/1_preparar.sh       # APIs, Firestore, cópias diárias, conta de serviço
+bash gcp/1_preparar.sh       # APIs, Firestore, cópias diárias, TTL dos registos, conta de serviço
 bash gcp/2_publicar.sh       # constrói e publica no Cloud Run (3 a 5 minutos)
-bash gcp/definir_admin.sh    # escreves tu a palavra-passe de administração
 bash gcp/3_dominio.sh        # verificação do domínio e ligação de eventos.marcaserio.pt
+bash gcp/5_login_google.sh   # login com Google (depois de criares o cliente OAuth; ver abaixo)
+bash gcp/4_ligar_github.sh   # publicação automática a cada push (ver mais abaixo)
 ```
+
+### Login com Google
+
+Cria o cliente OAuth uma vez, na consola do projeto (**Google Auth Platform**):
+
+1. **Branding:** nome da app «marcAsério Check-in» e email de suporte.
+2. **Audience:** escolhe **Internal**, para só a organização marcaserio.pt poder entrar.
+   Se a opção não aparecer (o projeto não pertence à organização Google Workspace), escolhe
+   **External** e publica a app (*Publish app*). Com os âmbitos `openid` e `email` não precisa de
+   verificação da Google, e a app só aceita contas da organização na mesma.
+3. **Clients → Create client → Web application**, com o nome «marcAsério Check-in».
+   - Em *Authorized redirect URIs*, põe `https://eventos.marcaserio.pt/auth/google/callback`.
+4. **O *Client secret* só aparece no momento da criação.** Corre `bash gcp/5_login_google.sh`,
+   que pede o Client ID e o Client secret, guarda-os no Secret Manager e volta a publicar a app.
+
+Até o login com Google estar ativo, ninguém consegue entrar online. Como plano B,
+`bash gcp/definir_admin.sh` dá uma palavra-passe a um administrador.
 
 Notas sobre o `3_dominio.sh`:
 
@@ -146,18 +191,16 @@ Depois corre:
 bash gcp/migrar_sqlite.sh ~/marcaserio_checkin.sqlite3
 ```
 
-O script copia:
-
-- a palavra-passe de administração, se ainda não houver uma;
-- os eventos, com as respetivas palavras-passe;
-- os participantes e os check-ins.
-
-Pode ser repetido: os eventos que já existam são ignorados.
+O script copia os eventos, os participantes e os check-ins. Não copia contas: online, os
+administradores entram com o Google e convidam as hospedeiras. Pode ser repetido; os eventos
+que já existam são ignorados.
 
 ## No dia do evento
 
 1. Liga a Honeywell ao Mac, como até aqui.
-2. Abre **`Abrir_Agente_Impressao.command`**, escolhe o evento e introduz a palavra-passe do evento.
+2. Abre **`Abrir_Agente_Impressao.command`**. Entra com um email e uma palavra-passe com acesso ao
+   evento e escolhe o evento. Sugestão: cria em Gestão uma conta de hospedeira só para isto, por
+   exemplo `impressora@marcaserio.pt`, atribuída ao evento.
 3. Deixa a janela aberta. O Mac não adormece enquanto o agente estiver a correr.
 4. No topo da app, a indicação da impressora passa a **«Impressora ligada»**.
 
@@ -182,7 +225,9 @@ Notas:
 | Publicar uma versão nova          | `git push` para o `main` (automático); à mão: `git pull && bash gcp/2_publicar.sh` |
 | Voltar à versão anterior          | Consola → Cloud Run → marcaserio-eventos → Revisions → *Manage traffic* |
 | Correr os testes                  | `python3 -m unittest discover tests` (em qualquer computador) |
-| Repor a palavra-passe de admin    | `bash gcp/definir_admin.sh`                            |
+| Convidar ou gerir pessoas         | Na app: **Gestão → Utilizadores**                      |
+| Ver quem fez o quê                | Na app: **Gestão → Registos** (administradores)        |
+| Entrar sem o Google (plano B)     | `bash gcp/definir_admin.sh`                            |
 | Ver o estado                      | `bash gcp/verificar.sh`                                |
 | Ver os registos da app            | Consola → Cloud Run → marcaserio-eventos → Logs        |
 
@@ -196,16 +241,24 @@ Cópias de segurança:
 
 ## Segurança
 
-- **Usa palavras-passe de evento fortes**, com 12 ou mais caracteres, e muda-as depois de cada evento.
-- **Mudar a palavra-passe de um evento termina as sessões** abertas desse evento.
+- **Contas pessoais:** cada pessoa tem a sua conta; tudo o que faz fica nos registos com o seu email.
+- **Hospedeiras:** usa palavras-passe com 12 ou mais caracteres e remove as contas, ou retira-lhes
+  os eventos, quando o evento acabar.
 - **Tentativas falhadas:** o mesmo endereço IP só pode falhar 10 vezes em 15 minutos.
+- **Google:** só entram contas da organização marcaserio.pt (campo `hd`). O Client secret está no
+  Secret Manager e só a conta de serviço da app o consegue ler.
 - **Sessões:** são cookies assinados, que só circulam em HTTPS. Os pedidos vindos de outros
   sites são recusados.
-- **Administração:** não se cria pelo browser; define-se com `gcp/definir_admin.sh`.
 - **Acesso ao projeto:** a conta de serviço só tem acesso à base de dados `marcaserio-eventos`,
   e não ao resto do projeto.
 
 ## Problemas comuns
+
+- **«Só as contas Google @marcaserio.pt podem entrar com o Google», com uma conta da empresa.**
+  A conta não pertence à organização Google Workspace da marcaserio.pt. Entra com email e
+  palavra-passe, pedindo a um administrador que ta defina.
+- **O Google mostra «redirect_uri_mismatch».** O endereço autorizado no cliente OAuth tem de ser
+  exatamente `https://eventos.marcaserio.pt/auth/google/callback`.
 
 - **O GitHub Actions falha na autenticação ou no deploy, com «Permission denied».** Confirma
   as 3 variáveis `GCP_*` no GitHub e corre de novo `bash gcp/4_ligar_github.sh`. Os registos

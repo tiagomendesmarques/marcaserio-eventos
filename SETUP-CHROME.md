@@ -14,8 +14,10 @@ iniciadas. A arquitetura está explicada no [GUIA-ONLINE.md](GUIA-ONLINE.md).
 2. Abre a extensão Claude in Chrome, no ícone da barra do Chrome, e cola o prompt abaixo.
 3. Fica por perto. O Claude vai parar e pedir-te confirmação:
    - antes de criar recursos no projeto `website-marcaserio-pt`;
-   - para escreveres tu a palavra-passe de administração, que ele nunca vê;
+   - para colares tu o *Client secret* do login com Google, que ele nunca vê;
    - se encontrar um registo `eventos` que já exista na Cloudflare.
+4. No fim, entra em https://eventos.marcaserio.pt com o teu Google (`tiago.marques@marcaserio.pt`).
+   Ficas logo como administrador e podes convidar as hospedeiras em **Gestão → Utilizadores**.
 
 Demora cerca de 30 minutos, mais o tempo de emissão do certificado (15 a 60 minutos).
 
@@ -42,10 +44,14 @@ REGRAS (obrigatórias)
    "(default)" ou outras, redes, firewall, permissões existentes). Os scripts só CRIAM:
    o serviço Cloud Run "marcaserio-eventos", a base de dados Firestore "marcaserio-eventos",
    um agendamento de cópias, a conta de serviço "marcaserio-eventos" e a respetiva permissão,
-   e (passo 6) o repositório de imagens "marcaserio-eventos", a conta "marcaserio-deployer",
-   o pool de Workload Identity "github" (se ainda não existir) e o provider "marcaserio-eventos".
-3. Palavras-passe: nunca as inventes, escrevas ou guardes. Quando um comando pedir uma,
-   para e diz-me para a escrever eu no terminal.
+   (passo 5) o cliente OAuth "marcAsério Check-in" e os segredos "marcaserio-google-client-id"
+   e "marcaserio-google-client-secret", e (passo 6) o repositório de imagens
+   "marcaserio-eventos", a conta "marcaserio-deployer", o pool de Workload Identity "github"
+   (se ainda não existir) e o provider "marcaserio-eventos".
+   Se o ecrã de consentimento OAuth (Google Auth Platform) do projeto JÁ estiver configurado,
+   não lhe alteres nada: só crias o cliente novo.
+3. Palavras-passe e segredos: nunca os inventes, escrevas ou guardes. Quando um comando pedir
+   uma palavra-passe ou o Client secret, para e diz-me para o escrever eu no terminal.
 4. Se algo falhar 2 vezes seguidas, para e explica-me o erro em vez de improvisar.
 
 PASSO 0. Verificação inicial (só ler)
@@ -73,8 +79,9 @@ PASSO 1. Código no Cloud Shell
 
 PASSO 2. Preparar o projeto
 - bash gcp/1_preparar.sh
-  (ativa as APIs Cloud Run, Firestore, Cloud Build e Artifact Registry; cria a base de dados
-  Firestore "marcaserio-eventos" em europe-west1, as cópias diárias e a conta de serviço)
+  (ativa as APIs Cloud Run, Firestore, Cloud Build, Artifact Registry e Secret Manager; cria a
+  base de dados Firestore "marcaserio-eventos" em europe-west1, as cópias diárias, a limpeza
+  automática dos registos ao fim de 12 meses e a conta de serviço)
 - Na consola: Firestore → base de dados "marcaserio-eventos" → Rules. As regras devem
   negar todo o acesso direto:  allow read, write: if false;
   Se estiverem diferentes, substitui-as por estas e publica (só nesta base de dados):
@@ -89,14 +96,10 @@ PASSO 3. Publicar no Cloud Run
 - bash gcp/2_publicar.sh   (demora 3 a 5 minutos; no fim mostra um endereço *.run.app)
 - Se falhar com um erro de permissões do Cloud Build, vê "Problemas comuns" no GUIA-ONLINE.md,
   aplica a correção indicada e tenta outra vez.
-- Abre o endereço *.run.app num separador: deve aparecer o ecrã "Escolher evento" da marcAsério.
+- Abre o endereço *.run.app num separador: deve aparecer o ecrã "Entrar" da marcAsério.
+  (Ainda não dá para entrar: o login com Google fica ativo no passo 5.)
 
-PASSO 4. Palavra-passe de administração
-- bash gcp/definir_admin.sh
-- Quando aparecer "Nova palavra-passe de administração:", PARA e diz-me para a escrever eu
-  (mínimo de 10 caracteres). Continua só quando eu disser.
-
-PASSO 5. Domínio
+PASSO 4. Domínio
 - bash gcp/3_dominio.sh
 - Da primeira vez, o script mostra um link da Google Search Console para verificar
   marcaserio.pt. Abre-o, escolhe a verificação por registo DNS TXT e cria esse TXT na
@@ -105,7 +108,25 @@ PASSO 5. Domínio
 - O script mostra o registo a criar. Na Cloudflare, cria:
     Type: CNAME · Name: eventos · Target: ghs.googlehosted.com · Proxy status: DNS only
 - O certificado demora entre 15 e 60 minutos. Vai correndo  bash gcp/verificar.sh  de 10 em 10
-  minutos até https://eventos.marcaserio.pt/ responder 200.
+  minutos até https://eventos.marcaserio.pt/ responder 200. Podes avançar para o passo 5
+  entretanto.
+
+PASSO 5. Login com Google
+- Na consola, abre "Google Auth Platform" (APIs & Services → OAuth consent screen).
+  Se ainda não estiver configurado:
+    Branding: App name "marcAsério Check-in", User support email tiago.marques@marcaserio.pt.
+    Audience: "Internal". Se só houver "External", escolhe External e depois "Publish app".
+    Contact information: tiago.marques@marcaserio.pt.
+  Se já estiver configurado (regra 2), não lhe mexas e diz-me o que lá está.
+- Clients → Create client:
+    Application type: Web application · Name: marcAsério Check-in
+    Authorized redirect URIs: https://eventos.marcaserio.pt/auth/google/callback
+  Carrega em Create. Aparece uma janela com o Client ID e o Client secret: NÃO a feches
+  (o Client secret só é mostrado uma vez).
+- No Cloud Shell, corre:  bash gcp/5_login_google.sh
+  Escreve o Client ID quando o pedir. Quando pedir o "Client secret", PARA (regra 3): diz-me
+  para eu copiar o Client secret da janela do Google e colá-lo no terminal.
+- O script guarda os dois valores no Secret Manager e volta a publicar a app (3 a 5 minutos).
 
 PASSO 6. Publicação automática pelo GitHub
 - bash gcp/4_ligar_github.sh
@@ -119,7 +140,9 @@ PASSO 6. Publicação automática pelo GitHub
   Se falhar, mostra-me o erro do passo que falhou.
 
 PASSO 7. Verificação final
-- Abre https://eventos.marcaserio.pt: deve aparecer o ecrã "Escolher evento".
+- Abre https://eventos.marcaserio.pt: deve aparecer o ecrã "Entrar", com o botão
+  "Entrar com Google (@marcaserio.pt)". Diz-me para eu entrar com o meu Google e confirmar
+  que fico como Administrador (não entres tu por mim).
 - Abre https://marcaserio.pt e confirma que está igual ao que viste no passo 0.
 - Na Cloudflare → DNS, confirma que o registo A de marcaserio.pt está igual ao do passo 0
   e que os únicos registos novos são o CNAME "eventos" (DNS only) e o TXT de verificação.
@@ -131,9 +154,13 @@ PASSO 7. Verificação final
 
 ## Depois da instalação
 
-- **Criar eventos:** abre https://eventos.marcaserio.pt e entra em **Administração de eventos**.
+- **Entrar:** em https://eventos.marcaserio.pt, com o Google. Tu e o Miguel são administradores;
+  as outras contas @marcaserio.pt entram como editores.
+- **Criar eventos e convidar hospedeiras:** **Gestão → Eventos** e **Gestão → Utilizadores**
+  (email, palavra-passe e eventos). Os registos estão em **Gestão → Registos**.
 - **Trazer os dados da versão local** (opcional): ver «Trazer os dados da versão local» no
   [GUIA-ONLINE.md](GUIA-ONLINE.md).
-- **No dia do evento:** no Mac ligado à Honeywell, abre `Abrir_Agente_Impressao.command`.
+- **No dia do evento:** no Mac ligado à Honeywell, abre `Abrir_Agente_Impressao.command` e entra
+  com uma conta com acesso ao evento (sugestão: uma hospedeira `impressora@marcaserio.pt`).
 - **Atualizar a app:** basta um `git push` para o `main`; o GitHub Actions testa e publica sozinho.
   À mão, no Cloud Shell: `cd ~/marcaserio-eventos && git pull && bash gcp/2_publicar.sh`.

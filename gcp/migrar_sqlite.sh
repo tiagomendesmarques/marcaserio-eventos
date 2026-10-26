@@ -1,6 +1,6 @@
 #!/bin/bash
-# Copia os dados da versão local (marcaserio_checkin.sqlite3) para o Firestore:
-# palavra-passe de administração, eventos (com as palavras-passe), participantes e check-ins.
+# Copia os eventos da versão local (marcaserio_checkin.sqlite3) para o Firestore:
+# eventos, participantes e check-ins. As contas não são copiadas.
 # Eventos que já existam no Firestore são ignorados.
 set -euo pipefail
 source "$(dirname "$0")/config.sh"

@@ -1,30 +1,33 @@
-marcAsério | Check-in v1.4
+marcAsério | Check-in v1.5
 
-VERSÃO ONLINE (eventos.marcaserio.pt, Cloud Run + Firestore): ver GUIA-ONLINE.md.
-Sem configuração, a app continua a funcionar como sempre, localmente neste Mac.
+VERSÃO ONLINE (eventos.marcaserio.pt, Cloud Run + Firestore, login com Google): ver GUIA-ONLINE.md.
+Sem configuração, a app funciona localmente neste Mac (plano B sem internet).
 
-INSTALAR LOCALMENTE (a partir da v1.1/v1.2)
-1. Fecha a v1.1 (Control+C na janela do Terminal).
-2. Copia para esta pasta, a partir da pasta da v1.1:
-   - marcaserio_checkin.sqlite3   (eventos, participantes, check-ins e passwords)
+CONTAS (local e online)
+Cada pessoa entra com a sua conta (email e palavra-passe; online também com o Google @marcaserio.pt).
+  Administrador  tudo, incluindo utilizadores e registos
+  Editor         eventos, listas, check-ins em todos os eventos, convidar hospedeiras
+  Hospedeira     só check-ins nos eventos a que foi atribuída
+Gerem-se em «Gestão» (botão ⚙ Gestão no ecrã de escolha do evento).
+Deixaram de existir as palavras-passe por evento e a palavra-passe de administração.
+
+VERSÃO LOCAL: INSTALAR (a partir da v1.1/v1.2/v1.4)
+1. Fecha a versão anterior (Control+C na janela do Terminal).
+2. Copia para esta pasta, a partir da pasta anterior:
+   - marcaserio_checkin.sqlite3   (eventos, participantes e check-ins)
    - a pasta copias_seguranca      (opcional, cópias anteriores)
 3. Executa: bash Abrir_marcAserio_CheckIn.command
-   As passwords de administração e dos eventos mantêm-se.
+4. Na primeira abertura, cria a conta de administração (email e palavra-passe).
+   Depois, em Gestão, cria os eventos e convida as hospedeiras.
 
-Sem a base de dados copiada, a app arranca vazia (primeira configuração).
+Sem a base de dados copiada, a app arranca vazia.
+Se tiveres uma CÓPIA de checkin_people_finance.sqlite3 nesta pasta na primeira abertura, os
+participantes do People & Finance Forum 2026 são importados automaticamente (a original
+nunca é alterada).
 
-PRIMEIRA UTILIZAÇÃO (instalação nova)
-1. Coloca aqui uma CÓPIA de checkin_people_finance.sqlite3 se quiseres importar
-   automaticamente os participantes do People & Finance Forum.
-2. Na primeira abertura, cria a password de administração e depois cria os eventos.
-3. O evento People & Finance Forum 2026 é criado automaticamente se existirem
-   participantes antigos; define-lhe uma password em Administração antes de o abrir.
-4. A app utiliza marcaserio_checkin.sqlite3, criada automaticamente; NÃO altera a
-   base de dados original.
-
-SUBSTITUIR A LISTA DE UM EVENTO
+SUBSTITUIR A LISTA DE UM EVENTO (administradores e editores)
 Na página do evento, abre «Importar inscrições» e escolhe «Substituir lista de participantes».
-É necessário introduzir a palavra-passe de administração e confirmar escrevendo SUBSTITUIR.
+É preciso confirmar escrevendo SUBSTITUIR.
 A lista antiga e os check-ins desse evento são substituídos; os outros eventos mantêm-se.
 É guardada uma cópia integral da base de dados na pasta copias_seguranca antes da operação.
 
@@ -40,8 +43,8 @@ agente_impressao.py             versão online: imprime no Mac do evento
 Abrir_Agente_Impressao.command  abre o agente de impressão
 gcp/                            scripts de instalação no Google Cloud (Cloud Run)
 SETUP-CHROME.md                 instalação guiada com o Claude in Chrome
+tests/                          testes automáticos (python3 -m unittest discover tests)
 
 Guarda uma cópia de segurança de marcaserio_checkin.sqlite3 regularmente.
 
-ATENÇÃO: A versão local funciona apenas neste Mac (127.0.0.1). As passwords não substituem
-autenticação de rede ou gestão centralizada de utilizadores.
+ATENÇÃO: A versão local funciona apenas neste Mac (127.0.0.1).

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """marcAsério | Check-in — acreditação de eventos, multi-evento.
 
-Cada evento tem a sua palavra-passe; a administração (criar eventos, alterar
-palavras-passe, substituir listas) tem uma palavra-passe própria.
+Contas com três perfis:
+  • administrador: tudo, incluindo utilizadores e registos;
+  • editor: eventos, listas e hospedeiras (qualquer conta Google @marcaserio.pt entra como editor);
+  • hospedeira: só check-ins nos eventos atribuídos (entra com email e palavra-passe).
 
 Corre de duas formas, escolhidas por variáveis de ambiente:
-  • local (por omissão): num Mac ligado à Honeywell, dados em SQLite, como até aqui;
+  • local (por omissão): num Mac ligado à Honeywell, dados em SQLite;
   • online: no Cloud Run, com MA_STORE=firestore e MA_PRINT_MODE=agente;
     as etiquetas ficam numa fila que o agente_impressao.py, no Mac do evento, imprime.
 
@@ -28,15 +30,16 @@ import sys
 import threading
 import time
 import unicodedata
+import urllib.request
 import webbrowser
 import zipfile
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 from xml.etree import ElementTree as ET
 
-from store_sqlite import AlreadyCheckedIn, SqliteStore
+from store_sqlite import AlreadyCheckedIn, SqliteStore, now
 
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / 'web'
@@ -53,19 +56,33 @@ OPEN_BROWSER = os.environ.get('MA_OPEN_BROWSER', '1') == '1'
 VERSION = os.environ.get('MA_VERSION', 'local')                # commit publicado (definido no deploy)
 DATA_DIR = Path(os.environ.get('MA_DATA_DIR', APP_DIR))
 
+# Contas: administradores de raiz e login com Google (só a organização marcaserio.pt).
+BOOTSTRAP_ADMINS = [e.strip().lower() for e in os.environ.get(
+    'MA_ADMINS', 'tiago.marques@marcaserio.pt,miguel.romao@marcaserio.pt').split(',') if e.strip()]
+GOOGLE_DOMAIN = os.environ.get('MA_GOOGLE_DOMAIN', 'marcaserio.pt')
+GOOGLE_CLIENT_ID = os.environ.get('MA_GOOGLE_CLIENT_ID', '').strip()
+GOOGLE_CLIENT_SECRET = os.environ.get('MA_GOOGLE_CLIENT_SECRET', '').strip()
+GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
+GOOGLE_TOKEN_URL = os.environ.get('MA_GOOGLE_TOKEN_URL', 'https://oauth2.googleapis.com/token')
+GOOGLE_ENABLED = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and PUBLIC_URL)
+
 PRINTER = 'Honeywell_PC42d_203_FP'
 WIDTH, HEIGHT = 560, 320
 
 LOCAL_ORIGIN = f'http://127.0.0.1:{PORT}'
 SECURE_COOKIE = PUBLIC_URL.startswith('https://')
-NO_PASSWORD = '!password-not-set!'
-SESSION_COOKIE = 'ma_session'
+SESSION_COOKIE, OAUTH_COOKIE = 'ma_session', 'ma_oauth'
 SESSION_TTL = 12 * 3600
 MAX_UPLOAD = 12_000_000
 MAX_ROWS = 20_000
 MAX_NAME, MAX_TEXT = 150, 180
-ADMIN_MIN_PASSWORD, EVENT_MIN_PASSWORD = 10, 8
+MIN_PASSWORD = 8
 LOGIN_WINDOW, LOGIN_MAX_FAILURES = 15 * 60, 10
+LOG_LIMIT = 500
+EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+ROLES = {'hostess': 0, 'editor': 1, 'admin': 2}
+ROLE_LABELS = {'hostess': 'Hospedeira', 'editor': 'Editor', 'admin': 'Administrador'}
 
 STATIC = {
     '/': ('index.html', 'text/html; charset=utf-8'),
@@ -85,11 +102,14 @@ def open_store():
         if PRINT_MODE == 'local':
             raise SystemExit('Com MA_STORE=firestore, usa MA_PRINT_MODE=agente.')
         from store_firestore import FirestoreStore  # só é preciso online
-        STORE = FirestoreStore(os.environ.get('GOOGLE_CLOUD_PROJECT'), FIRESTORE_DB, NO_PASSWORD)
+        STORE = FirestoreStore(os.environ.get('GOOGLE_CLOUD_PROJECT'), FIRESTORE_DB)
     else:
         STORE = SqliteStore(DATA_DIR / 'marcaserio_checkin.sqlite3', DATA_DIR / 'checkin_people_finance.sqlite3',
-                            DATA_DIR / 'copias_seguranca', NO_PASSWORD)
+                            DATA_DIR / 'copias_seguranca')
     STORE.init()
+    for email in BOOTSTRAP_ADMINS:
+        if not STORE.get_user(email):
+            STORE.save_user(new_user(email, 'admin'))
     return STORE
 
 
@@ -97,7 +117,7 @@ def public_event(event):
     return {'id': event['id'], 'name': event['name'], 'event_date': event.get('event_date', '')}
 
 
-# ── Palavras-passe e sessões ─────────────────────────────────────────────────
+# ── Contas ───────────────────────────────────────────────────────────────────
 
 def hash_password(password):
     salt = secrets.token_bytes(16)
@@ -114,20 +134,39 @@ def check_password(password, stored):
         return False
 
 
-def admin_hash():
-    return STORE.get_setting('admin_password')
+def normalize_email(value):
+    email = str(value or '').strip().lower()
+    if len(email) > 200 or not EMAIL_RE.match(email):
+        raise ValueError('Email inválido.')
+    return email
 
 
-def require_admin_password(password, error='Palavra-passe de administração incorreta.'):
-    stored = admin_hash()
-    if not stored or not check_password(password, stored):
-        raise PermissionError(error)
+def check_new_password(password):
+    if len(password) < MIN_PASSWORD:
+        raise ValueError(f'A palavra-passe deve ter pelo menos {MIN_PASSWORD} caracteres.')
+    return password
 
 
-def set_admin_password(password, only_if_absent=False):
-    if len(password) < ADMIN_MIN_PASSWORD:
-        raise ValueError(f'A palavra-passe de administração deve ter pelo menos {ADMIN_MIN_PASSWORD} caracteres.')
-    return STORE.set_setting('admin_password', hash_password(password), only_if_absent=only_if_absent)
+def new_user(email, role, password='', events=(), created_by='sistema'):
+    return {'email': email, 'role': role, 'password_hash': hash_password(password) if password else '',
+            'events': list(events), 'sv': 1, 'created_at': now(), 'created_by': created_by, 'last_login': ''}
+
+
+def is_company_email(email):
+    return email.endswith('@' + GOOGLE_DOMAIN)
+
+
+def at_least(user, role):
+    return ROLES.get(user['role'], -1) >= ROLES[role]
+
+
+def can_access(user, event_id):
+    return at_least(user, 'editor') or event_id in user.get('events', [])
+
+
+def setup_needed():
+    """Só na versão local: ninguém consegue entrar enquanto não houver um administrador com palavra-passe."""
+    return not PUBLIC_URL and not any(u['password_hash'] for u in STORE.list_users() if u['role'] == 'admin')
 
 
 def check_attempts(ip):
@@ -135,8 +174,10 @@ def check_attempts(ip):
         raise PermissionError('Demasiadas tentativas falhadas. Tenta novamente dentro de 15 minutos.')
 
 
-# As sessões são cookies assinados (nada fica em memória), para funcionarem com
-# vários contentores. Levam a impressão digital da palavra-passe: mudá-la termina-as.
+# ── Sessões ──────────────────────────────────────────────────────────────────
+# Cookies assinados (nada fica em memória), para funcionarem com vários contentores.
+# Levam a «versão de sessão» do utilizador: mudar-lhe a palavra-passe termina-as.
+# O perfil e os eventos são lidos a cada pedido, por isso as alterações contam logo.
 
 def _b64(data):
     return base64.urlsafe_b64encode(data).rstrip(b'=').decode()
@@ -144,10 +185,6 @@ def _b64(data):
 
 def _unb64(text):
     return base64.urlsafe_b64decode(text + '=' * (-len(text) % 4))
-
-
-def _fingerprint(password_hash):
-    return hashlib.sha256(password_hash.encode()).hexdigest()[:16]
 
 
 def session_secret():
@@ -158,34 +195,81 @@ def session_secret():
     return _SECRET
 
 
-def _signature(payload):
-    return _b64(hmac.new(session_secret(), payload.encode(), 'sha256').digest())
+def sign(data):
+    payload = _b64(json.dumps(data).encode())
+    return f'{payload}.{_b64(hmac.new(session_secret(), payload.encode(), "sha256").digest())}'
 
 
-def new_session(kind, password_hash, event_id=None):
-    payload = _b64(json.dumps({'k': kind, 'e': event_id, 'x': int(time.time() + SESSION_TTL),
-                               'f': _fingerprint(password_hash)}).encode())
-    return f'{payload}.{_signature(payload)}'
+def unsign(token):
+    """Devolve os dados de um token assinado e não expirado, ou None."""
+    try:
+        payload, signature = token.split('.')
+        expected = _b64(hmac.new(session_secret(), payload.encode(), 'sha256').digest())
+        if not hmac.compare_digest(signature, expected):
+            return None
+        data = json.loads(_unb64(payload))
+        return data if data['x'] >= time.time() else None
+    except (AttributeError, KeyError, ValueError, TypeError):
+        return None
+
+
+def new_session(user, event_id=None):
+    return sign({'u': user['email'], 's': user['sv'], 'e': event_id, 'x': int(time.time() + SESSION_TTL)})
 
 
 def read_session(token):
-    """Devolve {'kind', 'event'} se o cookie for válido e a palavra-passe não tiver mudado."""
+    data = unsign(token)
+    if not data:
+        return None
+    user = STORE.get_user(data.get('u'))
+    if not user or user.get('sv') != data.get('s'):
+        return None
+    event_id = data.get('e')
+    event = STORE.get_event(event_id) if event_id and can_access(user, event_id) else None
+    return {'user': user, 'event': event}
+
+
+# ── Login com Google (OpenID Connect) ────────────────────────────────────────
+
+def google_redirect_uri():
+    return PUBLIC_URL + '/auth/google/callback'
+
+
+def google_login_url(state):
+    return GOOGLE_AUTH_URL + '?' + urlencode({
+        'client_id': GOOGLE_CLIENT_ID, 'redirect_uri': google_redirect_uri(), 'response_type': 'code',
+        'scope': 'openid email', 'state': state, 'hd': GOOGLE_DOMAIN, 'prompt': 'select_account'})
+
+
+def check_google_claims(claims):
+    """Valida o id_token. Só contas da organização Google Workspace (campo hd), não apenas o email."""
+    if (claims.get('aud') != GOOGLE_CLIENT_ID or claims.get('exp', 0) < time.time()
+            or claims.get('iss') not in ('accounts.google.com', 'https://accounts.google.com')):
+        raise PermissionError('Resposta do Google inválida. Tenta outra vez.')
+    email = str(claims.get('email', '')).lower()
+    if not claims.get('email_verified') or claims.get('hd') != GOOGLE_DOMAIN or not is_company_email(email):
+        raise PermissionError(f'Só as contas Google @{GOOGLE_DOMAIN} podem entrar com o Google.')
+    return email
+
+
+def google_email(code):
+    # O id_token chega numa ligação direta (TLS) ao Google, por isso não é preciso verificar a assinatura.
+    body = urlencode({'code': code, 'client_id': GOOGLE_CLIENT_ID, 'client_secret': GOOGLE_CLIENT_SECRET,
+                      'redirect_uri': google_redirect_uri(), 'grant_type': 'authorization_code'}).encode()
+    with urllib.request.urlopen(urllib.request.Request(GOOGLE_TOKEN_URL, data=body), timeout=15) as res:
+        id_token = json.loads(res.read())['id_token']
+    return check_google_claims(json.loads(_unb64(id_token.split('.')[1])))
+
+
+# ── Registos ─────────────────────────────────────────────────────────────────
+
+def audit(actor, action, detail='', event=None, ip=''):
     try:
-        payload, signature = token.split('.')
-        if not hmac.compare_digest(signature, _signature(payload)):
-            return None
-        data = json.loads(_unb64(payload))
-    except (AttributeError, ValueError, TypeError):
-        return None
-    if data['x'] < time.time():
-        return None
-    if data['k'] == 'admin':
-        stored = admin_hash()
-        return {'kind': 'admin', 'event': None} if stored and _fingerprint(stored) == data['f'] else None
-    event = STORE.get_event(data['e'])
-    if not event or _fingerprint(event['password_hash']) != data['f']:
-        return None
-    return {'kind': 'event', 'event': event}
+        STORE.log({'ts': time.time(), 'at': now(), 'actor': actor or '', 'action': action,
+                   'event_id': event['id'] if event else '', 'event_name': event['name'] if event else '',
+                   'detail': str(detail)[:500], 'ip': ip or ''})
+    except Exception as exc:  # um registo falhado não deve impedir a ação
+        print(f'Erro ao gravar registo «{action}»: {exc}', file=sys.stderr, flush=True)
 
 
 # ── Impressão Direct Protocol (preservado literalmente da v2.6) ──────────────
@@ -451,9 +535,8 @@ def import_people(event, blob, filename):
     return len(new), skipped + len(people) - len(new)
 
 
-def replace_people(event, blob, filename, admin_password):
+def replace_people(event, blob, filename):
     """Substitui a lista (e os check-ins) deste evento, com cópia de segurança prévia."""
-    require_admin_password(admin_password, 'Palavra-passe de administração incorreta. A lista não foi alterada.')
     people, skipped = parse_people(blob, filename)
     with IMPORT_LOCK:
         old_count, backup = STORE.replace_people(event, people)
@@ -479,152 +562,323 @@ def route(method, *paths):
     return register
 
 
+def me(user):
+    return {'email': user['email'], 'role': user['role'], 'role_label': ROLE_LABELS[user['role']],
+            'can_manage': at_least(user, 'editor'), 'is_admin': at_least(user, 'admin')}
+
+
+def accessible_events(user):
+    return [e for e in STORE.list_events() if can_access(user, e['id'])]
+
+
 @route('GET', '/api/estado')
 def api_estado(h):
     """Verificação depois de cada deploy: versão no ar e base de dados a responder."""
-    return {'ok': True, 'version': VERSION, 'dados': STORE_KIND, 'impressao': PRINT_MODE,
-            'admin_configured': bool(admin_hash())}
+    STORE.get_setting('session_secret')  # confirma que a base de dados responde
+    return {'ok': True, 'version': VERSION, 'dados': STORE_KIND, 'impressao': PRINT_MODE, 'google': GOOGLE_ENABLED}
 
 
 @route('GET', '/api/session')
 def api_session(h):
     sess = h.session
-    return {'admin_configured': bool(admin_hash()),
-            'is_admin': bool(sess and sess['kind'] == 'admin'),
-            'event': public_event(sess['event']) if sess and sess['event'] else None}
+    return {'me': me(sess['user']) if sess else None,
+            'event': public_event(sess['event']) if sess and sess['event'] else None,
+            'google': GOOGLE_ENABLED, 'domain': GOOGLE_DOMAIN, 'setup_needed': setup_needed()}
 
 
-@route('GET', '/api/events')
-def api_events(h):
-    return {'events': STORE.list_events()}
+# ── entrar e sair ──
+
+def finish_login(h, user, method):
+    user['last_login'] = now()
+    STORE.save_user(user)
+    h.audit(f'Entrada ({method})', actor=user['email'])
+    return new_session(user)
 
 
-@route('GET', '/api/admin/events')
-def api_admin_events(h):
-    h.require('admin')
+@route('POST', '/api/setup')
+def api_setup(h):
+    if not setup_needed():
+        raise PermissionError('A administração já está configurada.')
+    email = normalize_email(h.data.get('email'))
+    password = check_new_password(str(h.data.get('password', '')))
+    user = STORE.get_user(email) or new_user(email, 'admin')
+    user.update(role='admin', password_hash=hash_password(password), sv=user.get('sv', 0) + 1)
+    STORE.save_user(user)
+    h.audit('Conta de administração criada', email, actor=email)
+    return {'me': me(user)}, finish_login(h, user, 'palavra-passe')
+
+
+@route('POST', '/api/login')
+def api_login(h):
+    email = str(h.data.get('email', '')).strip().lower()
+    user = STORE.get_user(email) if email else None
+    if not user or not user['password_hash'] or not check_password(str(h.data.get('password', '')), user['password_hash']):
+        h.audit('Entrada falhada', 'email ou palavra-passe incorretos', actor=email[:200])
+        raise PermissionError('Email ou palavra-passe incorretos.')
+    return {'me': me(user)}, finish_login(h, user, 'palavra-passe')
+
+
+@route('GET', '/auth/google')
+def auth_google(h):
+    if not GOOGLE_ENABLED:
+        return h.redirect('/?erro=' + quote('O login com Google não está configurado.'))
+    nonce = secrets.token_urlsafe(16)
+    state = sign({'n': nonce, 'x': int(time.time() + 600)})
+    h.redirect(google_login_url(state), [h.cookie(OAUTH_COOKIE, nonce, 600, samesite='Lax', path='/auth')])
+
+
+@route('GET', '/auth/google/callback')
+def auth_google_callback(h):
+    clear = h.cookie(OAUTH_COOKIE, '', 0, samesite='Lax', path='/auth')
+    try:
+        state = unsign(h.param('state'))
+        if not GOOGLE_ENABLED or not state or not hmac.compare_digest(state['n'], h.cookies.get(OAUTH_COOKIE, '')):
+            raise PermissionError('O pedido de login expirou. Tenta outra vez.')
+        if h.param('error') or not h.param('code'):
+            raise PermissionError('Login com Google cancelado.')
+        email = google_email(h.param('code'))
+        user = STORE.get_user(email)
+        if not user:  # contas @marcaserio.pt entram como editores
+            user = new_user(email, 'admin' if email in BOOTSTRAP_ADMINS else 'editor', created_by='Google')
+            STORE.save_user(user)
+            h.audit('Utilizador criado', f'{email} · {ROLE_LABELS[user["role"]]} (primeiro login com Google)', actor=email)
+        token = finish_login(h, user, 'Google')
+    except Exception as exc:
+        if not isinstance(exc, PermissionError):
+            print(f'Erro no login com Google: {exc}', file=sys.stderr, flush=True)
+        h.audit('Entrada falhada', f'Google: {exc}')
+        return h.redirect('/?erro=' + quote(str(exc) if isinstance(exc, PermissionError) else 'Não foi possível entrar com o Google.'), [clear])
+    h.redirect('/', [clear, h.cookie(SESSION_COOKIE, token, SESSION_TTL)])
+
+
+@route('POST', '/api/logout')
+def api_logout(h):
+    if h.session:
+        h.audit('Saída')
+    return {'message': 'Sessão terminada.'}, ''
+
+
+# ── escolher o evento ──
+
+@route('GET', '/api/my-events')
+def api_my_events(h):
+    return {'events': accessible_events(h.require()['user'])}
+
+
+@route('POST', '/api/select-event')
+def api_select_event(h):
+    user = h.require()['user']
+    event_id = str(h.data.get('event_id', ''))
+    event = STORE.get_event(event_id) if can_access(user, event_id) else None
+    if not event:
+        raise PermissionError('Não tens acesso a este evento.')
+    return {'event': public_event(event)}, new_session(user, event_id)
+
+
+@route('POST', '/api/leave-event')
+def api_leave_event(h):
+    return {'message': 'OK'}, new_session(h.require()['user'])
+
+
+# ── gestão: eventos ──
+
+@route('GET', '/api/manage/events')
+def api_manage_events(h):
+    h.require('editor')
     return {'events': STORE.list_events_with_stats()}
 
+
+@route('POST', '/api/manage/events/create')
+def api_create_event(h):
+    h.require('editor')
+    name = str(h.data.get('name', '')).strip()
+    date = str(h.data.get('event_date', '')).strip()
+    if not name or len(name) > 130:
+        raise ValueError('Indica um nome válido para o evento.')
+    if date and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date):
+        raise ValueError('Data inválida.')
+    event_id = STORE.create_event(name, date)
+    h.audit('Evento criado', date, event={'id': event_id, 'name': name})
+    return {'message': 'Evento criado.', 'id': event_id}
+
+
+# ── gestão: utilizadores ──
+
+def user_out(user, event_names):
+    return {'email': user['email'], 'role': user['role'], 'role_label': ROLE_LABELS[user['role']],
+            'events': user.get('events', []), 'event_names': [event_names.get(e, '?') for e in user.get('events', [])],
+            'has_password': bool(user['password_hash']), 'google': GOOGLE_ENABLED and is_company_email(user['email']),
+            'last_login': user.get('last_login', ''), 'created_by': user.get('created_by', '')}
+
+
+@route('GET', '/api/manage/users')
+def api_users(h):
+    h.require('editor')
+    names = {e['id']: e['name'] for e in STORE.list_events()}
+    return {'users': [user_out(u, names) for u in STORE.list_users()], 'roles': ROLE_LABELS}
+
+
+def check_can_edit(actor, target_role, existing):
+    if not at_least(actor, 'admin') and (target_role != 'hostess' or (existing and existing['role'] != 'hostess')):
+        raise PermissionError('Só um administrador pode gerir administradores e editores.')
+
+
+def check_keeps_an_admin(existing, new_role=None):
+    if existing and existing['role'] == 'admin' and new_role != 'admin':
+        if sum(1 for u in STORE.list_users() if u['role'] == 'admin') <= 1:
+            raise ValueError('Tem de ficar pelo menos um administrador.')
+
+
+@route('POST', '/api/manage/users/save')
+def api_user_save(h):
+    actor = h.require('editor')['user']
+    email = normalize_email(h.data.get('email'))
+    role = str(h.data.get('role', 'hostess'))
+    if role not in ROLES:
+        raise ValueError('Perfil inválido.')
+    password = str(h.data.get('password') or '')
+    events = sorted({str(e) for e in h.data.get('events') or []}) if role == 'hostess' else []
+    names = {e['id']: e['name'] for e in STORE.list_events()}
+    if any(e not in names for e in events):
+        raise ValueError('Evento inválido. Atualiza a página.')
+
+    existing = STORE.get_user(email)
+    check_can_edit(actor, role, existing)
+    check_keeps_an_admin(existing, role)
+    if password:
+        check_new_password(password)
+    elif not existing and not (GOOGLE_ENABLED and is_company_email(email)):
+        raise ValueError(f'Define uma palavra-passe: só as contas @{GOOGLE_DOMAIN} podem entrar com o Google.')
+    if role == 'hostess' and not events:
+        raise ValueError('Escolhe pelo menos um evento para a hospedeira.')
+
+    user = existing or new_user(email, role, created_by=actor['email'])
+    changes = []
+    if existing and existing['role'] != role:
+        changes.append(f'perfil {ROLE_LABELS[existing["role"]]} → {ROLE_LABELS[role]}')
+    if existing and sorted(existing.get('events', [])) != events:
+        changes.append('eventos alterados')
+    if password:
+        user.update(password_hash=hash_password(password), sv=user['sv'] + (1 if existing else 0))
+        if existing:
+            changes.append('palavra-passe alterada')
+    user.update(role=role, events=events)
+    STORE.save_user(user)
+
+    detail = f'{email} · {ROLE_LABELS[role]}'
+    if events:
+        detail += ' · ' + ', '.join(names[e] for e in events)
+    if changes:
+        detail += ' (' + '; '.join(changes) + ')'
+    h.audit('Utilizador alterado' if existing else 'Utilizador criado', detail)
+    return {'message': 'Utilizador guardado.' if existing else 'Utilizador criado.'}
+
+
+@route('POST', '/api/manage/users/delete')
+def api_user_delete(h):
+    actor = h.require('editor')['user']
+    email = normalize_email(h.data.get('email'))
+    existing = STORE.get_user(email)
+    if not existing:
+        raise ValueError('Utilizador não encontrado.')
+    if email == actor['email']:
+        raise ValueError('Não podes remover a tua própria conta.')
+    check_can_edit(actor, existing['role'], existing)
+    check_keeps_an_admin(existing)
+    STORE.delete_user(email)
+    h.audit('Utilizador removido', f'{email} · {ROLE_LABELS[existing["role"]]}')
+    return {'message': 'Utilizador removido.'}
+
+
+# ── gestão: registos ──
+
+@route('GET', '/api/manage/logs')
+def api_logs(h):
+    h.require('admin')
+    return {'logs': STORE.recent_logs(LOG_LIMIT), 'limit': LOG_LIMIT}
+
+
+# ── evento ──
 
 @route('GET', '/api/people')
 def api_people(h):
     """Lista do evento. Com ?v=<versão>&since=<instante>, só o que mudou desde então."""
-    event = h.require('event')['event']
-    version, full, people = STORE.people(event, h.param('v'), h.param('since'))
-    return {'version': version, 'full': full, 'people': people, 'now': time.time(), 'printer': printer_status(event)}
+    sess = h.require(event=True)
+    version, full, people = STORE.people(sess['event'], h.param('v'), h.param('since'))
+    return {'version': version, 'full': full, 'people': people, 'now': time.time(),
+            'printer': printer_status(sess['event']), 'can_import': at_least(sess['user'], 'editor')}
 
 
 @route('GET', '/api/export')
 def api_export(h):
-    event = h.require('event')['event']
+    event = h.require(event=True)['event']
     out = io.StringIO()
     writer = csv.writer(out, delimiter=';')
     writer.writerow(['Nome', 'Função', 'Empresa', 'Check-in', 'Data/hora', 'Origem'])
-    for p in STORE.people(event)[2]:
+    people = STORE.people(event)[2]
+    for p in people:
         writer.writerow([p['name'], p['role'], p['company'], 'Sim' if p['checked_at'] else 'Não', p['checked_at'] or '', p['source']])
+    h.audit('CSV exportado', f'{len(people)} participantes', event=event)
     slug = re.sub(r'[^a-z0-9]+', '_', norm(event['name'])).strip('_') or 'evento'
     h.send(200, ('﻿' + out.getvalue()).encode('utf-8'), 'text/csv; charset=utf-8',
            [('Content-Disposition', f'attachment; filename="checkins_{slug}.csv"')])
 
 
-@route('POST', '/api/logout')
-def api_logout(h):
-    return {'message': 'Sessão terminada.'}, ''
-
-
-@route('POST', '/api/setup-admin')
-def api_setup_admin(h):
-    if PUBLIC_URL:
-        # Online, quem abrisse o site primeiro ficaria com a administração.
-        raise PermissionError('Na versão online, a palavra-passe de administração define-se com: bash gcp/definir_admin.sh')
-    if not set_admin_password(str(h.data.get('password', '')), only_if_absent=True):
-        raise PermissionError('Administração já configurada.')
-    return {'message': 'Administração configurada.'}, new_session('admin', admin_hash())
-
-
-@route('POST', '/api/login-admin')
-def api_login_admin(h):
-    require_admin_password(str(h.data.get('password', '')))
-    return {'message': 'Autenticado.'}, new_session('admin', admin_hash())
-
-
-@route('POST', '/api/login-event')
-def api_login_event(h):
-    event = STORE.get_event(str(h.data.get('event_id', '')))
-    if event and event['password_hash'] == NO_PASSWORD:
-        raise PermissionError('Este evento ainda não tem palavra-passe. Define-a em Administração de eventos.')
-    if not event or not check_password(str(h.data.get('password', '')), event['password_hash']):
-        raise PermissionError('Palavra-passe do evento incorreta.')
-    return {'event': public_event(event)}, new_session('event', event['password_hash'], event['id'])
-
-
-@route('POST', '/api/admin/create-event')
-def api_create_event(h):
-    h.require('admin')
-    name = str(h.data.get('name', '')).strip()
-    date = str(h.data.get('event_date', '')).strip()
-    password = str(h.data.get('password', ''))
-    if not name or len(name) > 130:
-        raise ValueError('Indica um nome válido para o evento.')
-    if date and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date):
-        raise ValueError('Data inválida.')
-    if len(password) < EVENT_MIN_PASSWORD:
-        raise ValueError(f'A palavra-passe do evento deve ter pelo menos {EVENT_MIN_PASSWORD} caracteres.')
-    return {'message': 'Evento criado.', 'id': STORE.create_event(name, date, hash_password(password))}
-
-
-@route('POST', '/api/admin/change-password')
-def api_change_password(h):
-    h.require('admin')
-    event_id, password = str(h.data.get('event_id', '')), str(h.data.get('password', ''))
-    if len(password) < EVENT_MIN_PASSWORD:
-        raise ValueError(f'A palavra-passe deve ter pelo menos {EVENT_MIN_PASSWORD} caracteres.')
-    if not STORE.set_event_password(event_id, hash_password(password)):
-        raise ValueError('Evento não encontrado.')
-    return {'message': 'Palavra-passe alterada. As sessões anteriores deste evento foram terminadas.'}
-
-
 @route('POST', '/api/save', '/api/checkin', '/api/reprint', '/api/undo')
 def api_person(h):
-    action, event = h.path_only.rsplit('/', 1)[-1], h.require('event')['event']
+    action, event = h.path_only.rsplit('/', 1)[-1], h.require(event=True)['event']
+    pid = str(h.data.get('id') or '') or None
     fields = None if action == 'undo' else safe_fields(h.data)
-    pid = STORE.person_action(event, action, str(h.data.get('id') or '') or None, fields, badge)
+    new_pid = STORE.person_action(event, action, pid, fields, badge)
     message = PERSON_MESSAGES[action]
     if PRINT_MODE != 'local' and action in ('checkin', 'reprint'):
         wake_agents()
         if not printer_status(event)['online']:
             message += ' Atenção: a impressora do evento está desligada; a etiqueta fica em fila durante 15 minutos.'
-    return {'message': message, 'id': pid}
+    label = {'save': 'Participante editado' if pid else 'Walk-in criado',
+             'checkin': 'Check-in' if pid else 'Check-in (walk-in)',
+             'reprint': 'Badge reimpresso', 'undo': 'Check-in anulado'}[action]
+    h.audit(label, fields[0] if fields else str(h.data.get('name') or ''), event=event)
+    return {'message': message, 'id': new_pid}
 
 
 @route('GET', '/api/print/next')
 def api_print_next(h):
     if PRINT_MODE == 'local':
         raise ValueError('Este servidor imprime diretamente (modo local).')
-    job = next_job(h.require('event')['event'])
+    job = next_job(h.require(event=True)['event'])
     return {'job': job and {'id': job['id'], 'label': job['label'], 'data': base64.b64encode(job['data']).decode()}}
 
 
 @route('POST', '/api/print/result')
 def api_print_result(h):
-    STORE.finish_job(h.require('event')['event'], str(h.data.get('id', '')), str(h.data.get('error') or '')[:300])
+    event = h.require(event=True)['event']
+    error = str(h.data.get('error') or '')[:300]
+    STORE.finish_job(event, str(h.data.get('id', '')), error)
+    if error:
+        h.audit('Erro de impressão', error, event=event)
     return {'message': 'Registado.'}
 
 
 @route('POST', '/api/import')
 def api_import(h):
-    count, skipped = import_people(h.require('event')['event'], h.body, h.param('filename'))
+    event = h.require('editor', event=True)['event']
+    count, skipped = import_people(event, h.body, h.param('filename'))
+    h.audit('Lista importada', f'{count} novos, {skipped} ignorados ({h.param("filename")})', event=event)
     return {'message': f'{count} participantes importados. {skipped} ignorados (duplicados ou inválidos).'}
 
 
 @route('POST', '/api/replace')
 def api_replace(h):
-    old_count, count, skipped, backup = replace_people(
-        h.require('event')['event'], h.body, h.param('filename'), h.headers.get('X-Admin-Password', ''))
+    event = h.require('editor', event=True)['event']
+    old_count, count, skipped, backup = replace_people(event, h.body, h.param('filename'))
+    h.audit('Lista substituída', f'{old_count} → {count} participantes ({h.param("filename")}); cópia: {backup}', event=event)
     return {'message': f'Lista substituída: {old_count} anteriores removidos; {count} participantes importados; '
                        f'{skipped} linhas ignoradas. Cópia de segurança: {backup}.'}
 
 
-PASSWORD_ROUTES = {'/api/setup-admin', '/api/login-admin', '/api/login-event', '/api/replace'}
+PASSWORD_ROUTES = {'/api/setup', '/api/login'}
+_UNSET = object()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -641,7 +895,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def dispatch(self, method):
         url = urlparse(self.path)
-        self.path_only, self.query = url.path, parse_qs(url.query)
+        self.path_only, self.query, self._session = url.path, parse_qs(url.query), _UNSET
         if method == 'GET' and url.path in STATIC:
             filename, ctype = STATIC[url.path]
             return self.send(200, (WEB_DIR / filename).read_bytes(), ctype)
@@ -701,18 +955,45 @@ class Handler(BaseHTTPRequestHandler):
         return ip or self.client_address[0]
 
     @property
-    def session(self):
+    def cookies(self):
         try:
-            morsel = SimpleCookie(self.headers.get('Cookie', '')).get(SESSION_COOKIE)
+            return {k: m.value for k, m in SimpleCookie(self.headers.get('Cookie', '')).items()}
         except CookieError:
-            return None
-        return read_session(morsel.value) if morsel else None
+            return {}
 
-    def require(self, kind):
+    @property
+    def session(self):
+        if self._session is _UNSET:
+            token = self.cookies.get(SESSION_COOKIE)
+            self._session = read_session(token) if token else None
+        return self._session
+
+    def require(self, role=None, event=False):
         sess = self.session
-        if not sess or sess['kind'] != kind:
-            raise PermissionError('Acesso não autorizado. Entra novamente.')
+        if not sess:
+            raise PermissionError('Sessão terminada. Entra novamente.')
+        if role and not at_least(sess['user'], role):
+            raise PermissionError('Não tens permissão para esta ação.')
+        if event and not sess['event']:
+            raise PermissionError('Escolhe primeiro um evento.')
         return sess
+
+    def audit(self, action, detail='', event=None, actor=None):
+        sess = self.session if actor is None else None
+        audit(actor if actor is not None else (sess['user']['email'] if sess else ''), action, detail, event, self.client_ip)
+
+    def cookie(self, name, value, max_age, samesite='Strict', path='/'):
+        secure = '; Secure' if SECURE_COOKIE else ''
+        return ('Set-Cookie', f'{name}={value}; HttpOnly; SameSite={samesite}; Path={path}; Max-Age={max_age}{secure}')
+
+    def redirect(self, location, headers=()):
+        self.send_response(302)
+        self.send_header('Location', location)
+        self.send_header('Content-Length', '0')
+        self.send_header('Cache-Control', 'no-store')
+        for key, value in headers:
+            self.send_header(key, value)
+        self.end_headers()
 
     def send(self, status, body, ctype, headers=()):
         self.send_response(status)
@@ -729,24 +1010,25 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def send_json(self, obj, status=200, cookie=None):
-        headers = []
-        if cookie is not None:  # '' apaga o cookie
-            max_age = SESSION_TTL if cookie else 0
-            secure = '; Secure' if SECURE_COOKIE else ''
-            headers.append(('Set-Cookie', f'{SESSION_COOKIE}={cookie}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age}{secure}'))
+        headers = [] if cookie is None else [self.cookie(SESSION_COOKIE, cookie, SESSION_TTL if cookie else 0)]
         self.send(status, json.dumps(obj, ensure_ascii=False).encode('utf-8'), 'application/json; charset=utf-8', headers)
 
 
 def prompt_admin_password():
-    """Definir ou repor a palavra-passe de administração a partir do terminal."""
-    password = getpass.getpass('Nova palavra-passe de administração: ')
-    if password != getpass.getpass('Confirmar: '):
-        raise SystemExit('As palavras-passe não coincidem.')
+    """Cria um administrador com palavra-passe, ou repõe a de um existente, a partir do terminal."""
     try:
-        set_admin_password(password)
+        email = normalize_email(input('Email do administrador: '))
+        password = getpass.getpass('Nova palavra-passe: ')
+        if password != getpass.getpass('Confirmar: '):
+            raise SystemExit('As palavras-passe não coincidem.')
+        check_new_password(password)
     except ValueError as exc:
         raise SystemExit(str(exc))
-    print('Palavra-passe de administração definida.')
+    user = STORE.get_user(email) or new_user(email, 'admin', created_by='terminal')
+    user.update(role='admin', password_hash=hash_password(password), sv=user['sv'] + 1)
+    STORE.save_user(user)
+    audit('terminal', 'Utilizador alterado', f'{email} · Administrador (palavra-passe definida no terminal)')
+    print(f'Administrador {email} com palavra-passe definida.')
 
 
 def main():
@@ -758,7 +1040,8 @@ def main():
     except OSError as exc:
         raise SystemExit(f'Não foi possível iniciar a porta {PORT}. Fecha a versão anterior com Control+C. ({exc})')
     url = f'http://{HOST}:{PORT}/'
-    print(f'marcAsério | Check-in: {PUBLIC_URL or url} (dados: {STORE_KIND}, impressão: {PRINT_MODE})', flush=True)
+    login = 'Google + palavra-passe' if GOOGLE_ENABLED else 'palavra-passe'
+    print(f'marcAsério | Check-in: {PUBLIC_URL or url} (dados: {STORE_KIND}, impressão: {PRINT_MODE}, login: {login})', flush=True)
     if OPEN_BROWSER:
         print('Para terminar: Control+C')
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()

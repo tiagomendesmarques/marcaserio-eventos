@@ -1,7 +1,7 @@
 'use strict';
 
 const $ = id => document.getElementById(id);
-const state = { people: [], selected: null, isNew: false, busy: false, chosenEvent: null, version: null, since: 0 };
+const state = { me: null, people: [], selected: null, isNew: false, busy: false, version: null, since: 0, leftEvent: false };
 
 const clean = v => String(v ?? '').trim();
 const escapeHTML = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -29,149 +29,291 @@ function say(el, text, isError = false) {
   el.classList.toggle('error', !!text && isError);
 }
 const notify = (text, isError) => say($('status'), text, isError);
-const authSay = (text, isError = true) => say($('authStatus'), text, isError);
 
 async function withBusy(button, fn) {
   button.disabled = true;
   try { await fn(); } finally { button.disabled = false; }
 }
 
-/* ── Entrada e administração ─────────────────────────────────────────────── */
+/* ── Ecrãs ───────────────────────────────────────────────────────────────── */
+
+const SCREENS = ['login', 'picker', 'manage', 'app'];
+function show(screen) {
+  SCREENS.forEach(id => { $(id).hidden = id !== screen; });
+  if (screen !== 'app') document.title = 'marcAsério | Check-in';
+}
 
 async function boot() {
   try {
-    const session = await api('/api/session');
-    if (session.event) showApp(session.event);
-    else await showAuth(session);
-  } catch (e) { authSay(e.message); }
+    const s = await api('/api/session');
+    state.me = s.me;
+    if (!s.me) return showLogin(s);
+    if (s.event) return showApp(s.event);
+    await showPicker();
+  } catch (e) {
+    show('login');
+    say($('loginStatus'), e.message, true);
+  }
 }
 
-async function showAuth(session) {
-  $('app').hidden = true;
-  $('auth').hidden = false;
-  state.chosenEvent = null;
-  $('eventLogin').hidden = true;
-  const firstRun = !session.admin_configured;
-  $('setupAdmin').hidden = !firstRun;
-  $('adminSection').hidden = firstRun;
-  $('authTitle').textContent = firstRun ? 'Primeira configuração' : 'Escolher evento';
-  $('authIntro').textContent = firstRun
-    ? 'Define uma palavra-passe de administração para gerir os eventos.'
-    : 'Escolhe o evento e introduz a respetiva palavra-passe.';
-  await loadEvents();
-  if (session.is_admin) await showAdminTools();
+async function logout() {
+  await api('/api/logout', {}).catch(() => {});
+  state.me = null;
+  boot();
 }
 
-async function loadEvents() {
-  const { events } = await api('/api/events');
+/* ── Entrar ──────────────────────────────────────────────────────────────── */
+
+function showLogin(s) {
+  show('login');
+  state.setup = s.setup_needed;
+  $('googleLogin').hidden = !s.google || s.setup_needed;
+  $('loginDivider').hidden = !s.google || s.setup_needed;
+  $('googleLabel').textContent = `Entrar com Google (@${s.domain})`;
+  $('loginTitle').textContent = s.setup_needed ? 'Primeira configuração' : 'Entrar';
+  $('loginIntro').textContent = s.setup_needed
+    ? 'Cria a conta de administração com o teu email e uma palavra-passe.'
+    : 'Entra com a tua conta para fazer check-ins.';
+  $('loginPassword2').hidden = $('loginPassword2Label').hidden = !s.setup_needed;
+  $('loginPassword2').required = s.setup_needed;
+  $('loginPassword').autocomplete = s.setup_needed ? 'new-password' : 'current-password';
+  $('loginButton').textContent = s.setup_needed ? 'Criar conta de administração' : 'Entrar';
+  const error = new URLSearchParams(location.search).get('erro');
+  if (error) {
+    say($('loginStatus'), error, true);
+    history.replaceState(null, '', '/');
+  }
+}
+
+$('loginForm').onsubmit = async e => {
+  e.preventDefault();
+  const body = { email: $('loginEmail').value, password: $('loginPassword').value };
+  if (state.setup && body.password !== $('loginPassword2').value) {
+    return say($('loginStatus'), 'As palavras-passe não coincidem.', true);
+  }
+  await withBusy($('loginButton'), async () => {
+    try {
+      await api(state.setup ? '/api/setup' : '/api/login', body);
+      $('loginForm').reset();
+      say($('loginStatus'), '');
+      boot();
+    } catch (err) { say($('loginStatus'), err.message, true); }
+  });
+};
+
+/* ── Escolher o evento ───────────────────────────────────────────────────── */
+
+async function showPicker() {
+  show('picker');
+  $('pickerUser').textContent = state.me.email;
+  $('pickerRole').textContent = state.me.role_label;
+  $('openManage').hidden = !state.me.can_manage;
+  const { events } = await api('/api/my-events');
+  // Uma hospedeira com um só evento entra diretamente.
+  if (!state.me.can_manage && events.length === 1 && !state.leftEvent) return enterEvent(events[0].id);
   $('eventList').innerHTML = events.map(e => `
     <button type="button" class="event-choice" data-event="${escapeHTML(e.id)}">
       <b>${escapeHTML(e.name)}</b><small>${escapeHTML(e.event_date)}</small>
     </button>`).join('')
-    || '<p class="empty muted small">Ainda não existem eventos. Entra em Administração de eventos para criar o primeiro.</p>';
+    || `<p class="empty muted small">${state.me.can_manage
+      ? 'Ainda não existem eventos. Cria o primeiro em Gestão.'
+      : 'Ainda não tens nenhum evento atribuído. Fala com quem te convidou.'}</p>`;
+}
+
+async function enterEvent(eventId) {
+  try {
+    const { event } = await api('/api/select-event', { event_id: eventId });
+    showApp(event);
+  } catch (err) { say($('pickerStatus'), err.message, true); }
 }
 
 $('eventList').onclick = e => {
   const choice = e.target.closest('[data-event]');
-  if (!choice) return;
-  state.chosenEvent = choice.dataset.event;
-  document.querySelectorAll('[data-event]').forEach(b => b.classList.toggle('selected', b === choice));
-  $('eventLogin').hidden = false;
-  $('eventPassword').focus();
-  authSay('');
+  if (choice) enterEvent(choice.dataset.event);
+};
+$('openManage').onclick = () => showManage();
+$('logoutPicker').onclick = logout;
+
+/* ── Gestão ──────────────────────────────────────────────────────────────── */
+
+const manageSay = (text, isError) => say($('manageStatus'), text, isError);
+const ROLE_HELP = {
+  admin: 'Tudo: utilizadores, eventos, listas e registos.',
+  editor: 'Eventos, listas e hospedeiras. Entra em todos os eventos.',
+  hostess: 'Só faz check-ins nos eventos escolhidos abaixo.',
 };
 
-$('eventLogin').onsubmit = async e => {
-  e.preventDefault();
-  try {
-    const { event } = await api('/api/login-event', { event_id: state.chosenEvent, password: $('eventPassword').value });
-    $('eventPassword').value = '';
-    authSay('');
-    showApp(event);
-  } catch (err) { authSay(err.message); }
-};
+async function showManage(tab = 'tabEvents') {
+  show('manage');
+  manageSay('');
+  $('manageUser').textContent = `${state.me.email} · ${state.me.role_label}`;
+  $('logsTab').hidden = !state.me.is_admin;
+  openTab(tab);
+}
 
-$('setupAdmin').onsubmit = async e => {
-  e.preventDefault();
-  if ($('setupPassword').value !== $('setupPassword2').value) return authSay('As palavras-passe não coincidem.');
-  try {
-    await api('/api/setup-admin', { password: $('setupPassword').value });
-    $('setupAdmin').reset();
-    await showAuth({ admin_configured: true, is_admin: true });
-    authSay('Administração configurada. Cria o primeiro evento.', false);
-  } catch (err) { authSay(err.message); }
-};
+function openTab(tab) {
+  document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  document.querySelectorAll('.tab-panel').forEach(p => { p.hidden = p.id !== tab; });
+  ({ tabEvents: loadManageEvents, tabUsers: loadUsers, tabLogs: loadLogs })[tab]()
+    .catch(err => manageSay(err.message, true));
+}
 
-$('toggleAdmin').onclick = () => {
-  $('adminLogin').hidden = !$('adminLogin').hidden;
-  if (!$('adminLogin').hidden) $('adminPassword').focus();
-};
+document.querySelectorAll('.tab').forEach(b => { b.onclick = () => { manageSay(''); openTab(b.dataset.tab); }; });
+$('manageBack').onclick = () => { state.leftEvent = true; showPicker(); };
+$('logoutManage').onclick = logout;
 
-$('adminLogin').onsubmit = async e => {
-  e.preventDefault();
-  try {
-    await api('/api/login-admin', { password: $('adminPassword').value });
-    $('adminLogin').reset();
-    $('adminLogin').hidden = true;
-    authSay('');
-    await showAdminTools();
-  } catch (err) { authSay(err.message); }
-};
-
-$('adminLogout').onclick = async () => {
-  await api('/api/logout', {});
-  $('adminTools').hidden = true;
-  $('toggleAdmin').hidden = false;
-  authSay('');
-};
-
-async function showAdminTools() {
-  $('adminTools').hidden = false;
-  $('toggleAdmin').hidden = true;
-  const { events } = await api('/api/admin/events');
-  $('adminEventList').innerHTML = events.map(e => `
-    <div class="admin-event">
-      <div class="row between">
+async function loadManageEvents() {
+  const { events } = await api('/api/manage/events');
+  state.events = events;
+  $('manageEvents').innerHTML = events.map(e => `
+    <div class="row-item">
+      <div class="info">
         <b>${escapeHTML(e.name)}</b>
-        ${e.has_password ? `<span class="tag">${e.checked}/${e.total} check-ins</span>` : '<span class="tag warn">Sem palavra-passe</span>'}
+        <div class="meta">${escapeHTML(e.event_date || 'Sem data')} · ${e.checked}/${e.total} check-ins</div>
       </div>
-      <div class="small muted">${escapeHTML(e.event_date || 'Sem data')}</div>
-      <form data-id="${escapeHTML(e.id)}">
-        <input type="password" placeholder="Nova palavra-passe (mín. 8)" autocomplete="new-password" required>
-        <button class="btn small">${e.has_password ? 'Alterar' : 'Definir'}</button>
-      </form>
+      <button type="button" class="btn small" data-open="${escapeHTML(e.id)}">Abrir</button>
     </div>`).join('') || '<p class="muted small">Ainda não existem eventos.</p>';
 }
 
-$('adminEventList').onsubmit = async e => {
-  e.preventDefault();
-  const form = e.target, input = form.querySelector('input');
-  if (!confirm('Alterar a palavra-passe deste evento?')) return;
-  try {
-    const d = await api('/api/admin/change-password', { event_id: form.dataset.id, password: input.value });
-    await showAdminTools();
-    authSay(d.message, false);
-  } catch (err) { authSay(err.message); }
+$('manageEvents').onclick = e => {
+  const button = e.target.closest('[data-open]');
+  if (button) enterEvent(button.dataset.open);
 };
 
 $('createEvent').onsubmit = async e => {
   e.preventDefault();
   try {
-    await api('/api/admin/create-event', {
-      name: $('eventName').value, event_date: $('eventDate').value, password: $('newEventPassword').value,
-    });
+    await api('/api/manage/events/create', { name: $('eventName').value, event_date: $('eventDate').value });
     $('createEvent').reset();
-    await Promise.all([loadEvents(), showAdminTools()]);
-    authSay('Evento criado com sucesso.', false);
-  } catch (err) { authSay(err.message); }
+    await loadManageEvents();
+    manageSay('Evento criado.');
+  } catch (err) { manageSay(err.message, true); }
 };
+
+async function loadUsers() {
+  const [{ users, roles }, { events }] = await Promise.all([api('/api/manage/users'), api('/api/manage/events')]);
+  state.users = users;
+  state.events = events;
+  $('userRole').innerHTML = Object.entries(roles)
+    .filter(([role]) => state.me.is_admin || role === 'hostess')
+    .map(([role, label]) => `<option value="${role}">${label}</option>`).join('');
+  $('usersNote').textContent = state.me.is_admin
+    ? 'As contas @marcaserio.pt que entram com o Google ficam automaticamente como editores.'
+    : 'Como editor, podes convidar e gerir hospedeiras.';
+  renderUsers();
+  resetUserForm();
+}
+
+function renderUsers() {
+  const q = clean($('userSearch').value).toLowerCase();
+  const editable = u => state.me.is_admin || u.role === 'hostess';
+  $('userList').innerHTML = state.users.filter(u => u.email.includes(q)).map(u => `
+    <div class="row-item">
+      <div class="info">
+        <b>${escapeHTML(u.email)}</b> <span class="tag ${u.role}">${escapeHTML(u.role_label)}</span>
+        <div class="meta">${[
+          u.role === 'hostess' ? escapeHTML(u.event_names.join(', ') || 'sem eventos') : 'todos os eventos',
+          [u.google && 'Google', u.has_password && 'palavra-passe'].filter(Boolean).join(' + ') || 'sem forma de entrar',
+          u.last_login ? 'última entrada ' + escapeHTML(formatDate(u.last_login)) : 'nunca entrou',
+        ].join(' · ')}</div>
+      </div>
+      ${editable(u) ? `<div class="row">
+        <button type="button" class="btn small" data-edit="${escapeHTML(u.email)}">Editar</button>
+        ${u.email === state.me.email ? '' : `<button type="button" class="btn small danger" data-remove="${escapeHTML(u.email)}">Remover</button>`}
+      </div>` : ''}
+    </div>`).join('') || '<p class="muted small">Sem resultados.</p>';
+}
+
+function resetUserForm(user) {
+  state.editingUser = user || null;
+  $('userForm').reset();
+  $('userEmail').value = user ? user.email : '';
+  $('userEmail').readOnly = !!user;
+  $('userRole').value = user ? user.role : 'hostess';
+  $('userFormTitle').textContent = user ? 'Editar utilizador' : 'Convidar utilizador';
+  $('userSave').textContent = user ? 'Guardar alterações' : 'Criar utilizador';
+  $('userFormReset').hidden = !user;
+  $('userEvents').innerHTML = (state.events || []).map(e => `
+    <label class="check"><input type="checkbox" value="${escapeHTML(e.id)}" ${user && user.events.includes(e.id) ? 'checked' : ''}>
+      ${escapeHTML(e.name)} <small>${escapeHTML(e.event_date)}</small></label>`).join('')
+    || '<p class="muted small">Ainda não existem eventos.</p>';
+  syncUserForm();
+}
+
+function syncUserForm() {
+  const role = $('userRole').value, editing = state.editingUser;
+  $('roleHelp').textContent = ROLE_HELP[role] || '';
+  $('userEventsBox').hidden = role !== 'hostess';
+  $('userPasswordLabel').textContent = editing ? 'Nova palavra-passe (opcional)' : 'Palavra-passe';
+  $('passwordHelp').textContent = editing
+    ? 'Se a mudares, as sessões abertas desta pessoa terminam. Envia-lhe a nova palavra-passe.'
+    : 'Envia o email e a palavra-passe à pessoa. Pode entrar logo a seguir.';
+}
+
+$('userRole').onchange = syncUserForm;
+$('userSearch').oninput = renderUsers;
+$('userFormReset').onclick = () => resetUserForm();
+
+$('userList').onclick = async e => {
+  const edit = e.target.closest('[data-edit]'), remove = e.target.closest('[data-remove]');
+  if (edit) {
+    resetUserForm(state.users.find(u => u.email === edit.dataset.edit));
+    $('userForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } else if (remove && confirm(`Remover ${remove.dataset.remove}? Deixa de conseguir entrar.`)) {
+    try {
+      const d = await api('/api/manage/users/delete', { email: remove.dataset.remove });
+      await loadUsers();
+      manageSay(d.message);
+    } catch (err) { manageSay(err.message, true); }
+  }
+};
+
+$('userForm').onsubmit = async e => {
+  e.preventDefault();
+  const body = {
+    email: $('userEmail').value,
+    role: $('userRole').value,
+    password: $('userPassword').value,
+    events: [...$('userEvents').querySelectorAll('input:checked')].map(i => i.value),
+  };
+  await withBusy($('userSave'), async () => {
+    try {
+      const d = await api('/api/manage/users/save', body);
+      await loadUsers();
+      manageSay(d.message);
+    } catch (err) { manageSay(err.message, true); }
+  });
+};
+
+async function loadLogs() {
+  const { logs, limit } = await api('/api/manage/logs');
+  state.logs = logs;
+  $('logsNote').textContent = `Os ${limit} registos mais recentes. Ficam guardados durante 12 meses.`;
+  renderLogs();
+}
+
+function renderLogs() {
+  const q = clean($('logSearch').value).toLocaleLowerCase('pt');
+  const rows = state.logs.filter(l => [l.actor, l.action, l.event_name, l.detail].join(' ').toLocaleLowerCase('pt').includes(q));
+  $('logRows').innerHTML = rows.map(l => `
+    <tr class="${/falhad|Erro/.test(l.action) ? 'warn' : ''}">
+      <td class="nowrap">${escapeHTML(formatDate(l.at))}</td>
+      <td>${escapeHTML(l.actor || '—')}</td>
+      <td class="nowrap"><b>${escapeHTML(l.action)}</b></td>
+      <td>${escapeHTML(l.event_name)}</td>
+      <td>${escapeHTML(l.detail)}${l.ip ? ` <small class="muted">${l.detail ? '· ' : ''}${escapeHTML(l.ip)}</small>` : ''}</td>
+    </tr>`).join('') || '<tr><td colspan="5" class="muted">Sem registos.</td></tr>';
+}
+
+$('logSearch').oninput = renderLogs;
+$('logsReload').onclick = () => loadLogs().catch(err => manageSay(err.message, true));
 
 /* ── Evento ──────────────────────────────────────────────────────────────── */
 
 function showApp(event) {
-  $('auth').hidden = true;
-  $('app').hidden = false;
+  show('app');
   $('eventTitle').textContent = event.name;
+  $('logoutApp').title = state.me ? state.me.email : '';
   document.title = `${event.name} | marcAsério Check-in`;
   state.selected = null;
   state.isNew = false;
@@ -180,10 +322,11 @@ function showApp(event) {
 }
 
 $('leaveEvent').onclick = async () => {
-  await api('/api/logout', {});
-  document.title = 'marcAsério | Check-in';
-  boot();
+  await api('/api/leave-event', {}).catch(() => {});
+  state.leftEvent = true;
+  showPicker().catch(err => say($('pickerStatus'), err.message, true));
 };
+$('logoutApp').onclick = logout;
 
 const currentPerson = () => state.people.find(p => p.id === state.selected);
 const formValues = () => ({ name: clean($('name').value), role: clean($('role').value), company: clean($('company').value) });
@@ -212,6 +355,10 @@ async function loadPeople() {
   $('percent').textContent = total ? `· ${pct}%` : '';
   $('progress').style.width = pct + '%';
   showPrinter(d.printer);
+  // Hospedeiras: só exportar; importar e substituir listas é para editores e administradores.
+  document.querySelectorAll('.editor-only').forEach(el => { el.hidden = !d.can_import; });
+  $('importSummary').textContent = d.can_import ? 'Importar inscrições' : 'Exportar';
+  state.canImport = d.can_import;
   return total;
 }
 
@@ -227,7 +374,7 @@ function showPrinter(p) {
 }
 
 async function refresh() {
-  if (!await loadPeople()) $('importBox').open = true;
+  if (!await loadPeople() && state.canImport) $('importBox').open = true;
 
   if (currentPerson()) select(state.selected);
   else if (!state.isNew && state.people.length) select(state.people[0].id);
@@ -251,7 +398,8 @@ function render() {
       </div>
       <span class="tag ${p.checked_at ? 'ok' : ''}">${p.checked_at ? '✓ Entrou' : 'Pendente'}</span>
     </div>`).join('')
-    || `<div class="empty">${state.people.length ? 'Sem resultados.' : 'Ainda não existem participantes. Importa uma lista abaixo.'}</div>`;
+    || `<div class="empty">${state.people.length ? 'Sem resultados.'
+      : state.canImport ? 'Ainda não existem participantes. Importa uma lista abaixo.' : 'Ainda não existem participantes.'}</div>`;
 }
 
 function fillEditor(p) {
@@ -400,8 +548,7 @@ $('replaceForm').onsubmit = async e => {
   if (prompt('Para confirmar, escreve SUBSTITUIR (em maiúsculas):') !== 'SUBSTITUIR') return;
   await withBusy(e.submitter, async () => {
     try {
-      const d = await api('/api/replace?filename=' + encodeURIComponent(file.name), await file.arrayBuffer(),
-        { 'X-Admin-Password': $('replaceAdminPassword').value });
+      const d = await api('/api/replace?filename=' + encodeURIComponent(file.name), await file.arrayBuffer());
       $('replaceForm').reset();
       $('replaceForm').hidden = true;
       state.selected = null;

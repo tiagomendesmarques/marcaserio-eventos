@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """marcAsério | Agente de impressão.
 
-Corre no Mac ligado à Honeywell, no local do evento. Entra no evento da versão
-online com a palavra-passe do evento e imprime as etiquetas à medida que as
-hospedeiras fazem check-in, em qualquer dispositivo.
+Corre no Mac ligado à Honeywell, no local do evento. Entra na versão online com
+email e palavra-passe (por exemplo, uma conta de hospedeira atribuída ao evento)
+e imprime as etiquetas à medida que as hospedeiras fazem check-in, em qualquer
+dispositivo.
 
 Os comandos Direct Protocol chegam já gerados pelo servidor (a mesma função da
 v2.6) e seguem para a impressora com o mesmo comando lp do modo local.
@@ -60,10 +61,30 @@ def request(path, data=None, cookie=None, timeout=40):
         raise ApiError(message or f'Resposta HTTP {exc.code} inesperada.', exc.code) from None
 
 
-def choose_event():
-    events = request('/api/events')[0]['events']
+def cookie_from(headers):
+    return f"ma_session={SimpleCookie(headers.get('Set-Cookie', ''))['ma_session'].value}"
+
+
+def login(credentials=None):
+    """Entra com email e palavra-passe. Devolve (credenciais, cookie); tenta primeiro as já conhecidas."""
+    while True:
+        if credentials is None:
+            email = input('Email: ').strip()
+            credentials = (email, getpass.getpass('Palavra-passe: '))
+        try:
+            _, headers = request('/api/login', {'email': credentials[0], 'password': credentials[1]})
+            return credentials, cookie_from(headers)
+        except ApiError as exc:
+            print(f'  {exc}')
+            if exc.status == 403 and 'Demasiadas' in str(exc):
+                time.sleep(60)
+            credentials = None
+
+
+def choose_event(cookie):
+    events = request('/api/my-events', cookie=cookie)[0]['events']
     if not events:
-        raise SystemExit('Ainda não existem eventos na versão online.')
+        raise SystemExit('Esta conta não tem nenhum evento atribuído.')
     print('\nEventos:')
     for i, event in enumerate(events, 1):
         print(f'  {i}. {event["name"]}  {event["event_date"]}')
@@ -73,20 +94,9 @@ def choose_event():
             return events[int(choice) - 1]
 
 
-def login(event, password=None):
-    """Devolve (password, cookie). Tenta primeiro a password já conhecida."""
-    while True:
-        if password is None:
-            password = getpass.getpass(f'Palavra-passe de «{event["name"]}»: ')
-        try:
-            _, headers = request('/api/login-event', {'event_id': event['id'], 'password': password})
-            token = SimpleCookie(headers.get('Set-Cookie', ''))['ma_session'].value
-            return password, f'ma_session={token}'
-        except ApiError as exc:
-            print(f'  {exc}')
-            if exc.status == 403 and 'Demasiadas' in str(exc):
-                time.sleep(60)
-            password = None
+def enter(event, cookie):
+    _, headers = request('/api/select-event', {'event_id': event['id']}, cookie)
+    return cookie_from(headers)
 
 
 def print_job(job, cookie):
@@ -104,8 +114,9 @@ def print_job(job, cookie):
 
 def main():
     print(f'marcAsério | Agente de impressão\nServidor: {URL}\nImpressora: {PRINTER}')
-    event = choose_event()
-    password, cookie = login(event)
+    credentials, cookie = login()
+    event = choose_event(cookie)
+    cookie = enter(event, cookie)
     log(f'Ligado a «{event["name"]}». À espera de etiquetas… (Control+C para terminar)')
     delay = 1
     while True:
@@ -115,9 +126,13 @@ def main():
             if job:
                 print_job(job, cookie)
         except ApiError as exc:
-            if exc.status == 403:  # sessão expirada ou palavra-passe alterada
-                log('Sessão terminada; a entrar de novo…')
-                password, cookie = login(event, password)
+            if exc.status == 403:  # sessão expirada, palavra-passe alterada ou acesso retirado
+                log(f'Sem acesso ({exc}); a entrar de novo…')
+                credentials, cookie = login(credentials)
+                try:
+                    cookie = enter(event, cookie)
+                except ApiError as err:
+                    raise SystemExit(f'Sem acesso ao evento «{event["name"]}»: {err}')
                 continue
             log(f'Erro do servidor: {exc}')
             time.sleep(delay)
