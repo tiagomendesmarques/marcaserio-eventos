@@ -12,3 +12,5 @@ agente_impressao.py
 copias_seguranca/
 __pycache__/
 .DS_Store
+tests/
+.github/

@@ -1,0 +1,81 @@
+# Publica no Cloud Run a cada push para o main (ou à mão, em Actions → Run workflow).
+# A ligação ao Google Cloud não usa chaves: o GitHub prova que é este repositório
+# (Workload Identity Federation) e recebe um acesso temporário da conta marcaserio-deployer.
+# Configuração única: gcp/4_ligar_github.sh e as variáveis GCP_* do repositório.
+name: Publicar no Cloud Run
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'LEIA-ME.txt', 'agente_impressao.py', '*.command', 'gcp/**']
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  REGION: europe-west1
+  SERVICE: marcaserio-eventos
+  DOMAIN: eventos.marcaserio.pt
+  IMAGE: europe-west1-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/marcaserio-eventos/app:${{ github.sha }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Testes (se falharem, nada é publicado)
+        run: |
+          python3 -m py_compile marcaserio_checkin.py store_sqlite.py store_firestore.py agente_impressao.py
+          node --check web/app.js
+          python3 -m unittest discover -v tests
+
+      - name: Ligação ao Google Cloud ainda por configurar?
+        if: ${{ vars.GCP_WIF_PROVIDER == '' }}
+        run: echo "::warning::Deploy em pausa. Corre gcp/4_ligar_github.sh e cria as variáveis GCP_* do repositório."
+
+      - name: Autenticação no Google Cloud (sem chaves)
+        if: ${{ vars.GCP_WIF_PROVIDER != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        if: ${{ vars.GCP_WIF_PROVIDER != '' }}
+
+      - name: Construir e enviar a imagem
+        if: ${{ vars.GCP_WIF_PROVIDER != '' }}
+        run: |
+          gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Publicar (o Cloud Run só troca de versão quando a nova responde)
+        if: ${{ vars.GCP_WIF_PROVIDER != '' }}
+        run: |
+          gcloud run deploy "$SERVICE" --image "$IMAGE" --region "$REGION" \
+            --update-env-vars "MA_VERSION=${{ github.sha }}" --quiet
+
+      - name: Verificar
+        if: ${{ vars.GCP_WIF_PROVIDER != '' }}
+        run: |
+          URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')"
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS "$URL/api/estado" | grep -q '"version": "${{ github.sha }}"'; then
+              echo "No ar: $URL (versão ${{ github.sha }})"
+              break
+            fi
+            [ "$attempt" = 10 ] && { echo "::error::A versão nova não respondeu em $URL"; exit 1; }
+            sleep 6
+          done
+          curl -fsS "https://$DOMAIN/api/estado" \
+            && echo "  https://$DOMAIN a responder." \
+            || echo "::warning::https://$DOMAIN ainda não responde (domínio ou certificado por configurar?)"

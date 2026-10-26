@@ -15,6 +15,8 @@ Acreditação de eventos com impressão de badges numa Honeywell PC42d (Direct P
 | `web/` | Interface (HTML, CSS e JS) |
 | `agente_impressao.py` | Agente que imprime as etiquetas da versão online no Mac do evento |
 | `Dockerfile`, `requirements.txt` | Contentor do Cloud Run |
+| `.github/workflows/deploy.yml` | Testa e publica no Cloud Run a cada push para o `main` |
+| `tests/` | Teste de ponta a ponta (`python3 -m unittest discover tests`) |
 | `gcp/` | Scripts de instalação e manutenção no Google Cloud |
 
 O bloco de impressão Direct Protocol (`ascii_text`, `badge_layout`, `dp_commands`, `print_badge`)

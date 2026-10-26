@@ -40,7 +40,8 @@ Só corre quando alguém a está a usar.
 | Base de dados Firestore (Native) | `marcaserio-eventos`, com proteção contra eliminação |
 | Agendamento de cópias do Firestore | diário, guardado 14 dias |
 | Conta de serviço | `marcaserio-eventos@<projeto>.iam.gserviceaccount.com`, só com acesso à base de dados acima |
-| Imagens do contentor | Artifact Registry `cloud-run-source-deploy`, criado pelo `gcloud run deploy` |
+| Imagens do contentor | Artifact Registry `marcaserio-eventos` (deploys do GitHub, guarda as 10 últimas) e `cloud-run-source-deploy` (deploys manuais) |
+| Deploy pelo GitHub | Conta `marcaserio-deployer`, *pool* de Workload Identity `github` e *provider* `marcaserio-eventos` |
 
 Nada do que já existe no projeto é alterado.
 
@@ -86,6 +87,56 @@ Notas sobre o `3_dominio.sh`:
 - **O certificado HTTPS demora entre 15 e 60 minutos.** Entretanto, `bash gcp/verificar.sh`
   mostra o estado.
 
+### Publicação automática a cada push (GitHub Actions)
+
+Depois de a app estar publicada, um `git push` para o `main` chega para pôr a versão nova no ar,
+em 3 a 4 minutos:
+
+```
+git push ──▶ GitHub Actions ──▶ testes ──▶ constrói a imagem ──▶ Artifact Registry ──▶ Cloud Run ──▶ verificação
+             (deploy.yml)       (se falharem,                                          (troca de versão   (/api/estado
+                                 não publica)                                           sem cortes)        devolve o commit)
+```
+
+1. **O gatilho.** O ficheiro `.github/workflows/deploy.yml` corre a cada push para o `main`.
+   Também se pode correr à mão, em Actions → *Run workflow*. Alterações só à documentação,
+   ao agente ou aos scripts `gcp/` não publicam.
+2. **Os testes.** O workflow compila o código e corre `tests/`: arranca a app e faz um evento
+   completo, com importação, check-in, check-in repetido e fila de impressão. Confirma também
+   que as etiquetas saem exatamente com os comandos da v2.6. Se algo falhar, nada é publicado.
+3. **A autenticação, sem chaves (Workload Identity Federation).** O GitHub prova ao Google que
+   o pedido vem do repositório `tiagomendesmarques/marcaserio-eventos`, ramo `main`. Recebe em
+   troca um acesso que dura pouco tempo, da conta `marcaserio-deployer`. Essa conta só pode:
+   - enviar imagens para o seu repositório;
+   - atualizar o serviço `marcaserio-eventos`.
+
+   Não consegue tocar no site nem no resto do projeto. Outro repositório não a consegue usar,
+   mesmo que copie o ficheiro.
+4. **A construção.** A imagem é construída na máquina do GitHub, a partir do `Dockerfile`,
+   e guardada no Artifact Registry.
+5. **A troca de versão.** O Cloud Run arranca a versão nova ao lado da antiga e só passa o
+   tráfego para ela quando responde. Se não arrancar, a antiga continua no ar.
+6. **A verificação.** O workflow abre `/api/estado` até a resposta indicar o commit acabado de
+   publicar. Depois confirma também `https://eventos.marcaserio.pt`.
+
+**Configuração (uma vez).** No Cloud Shell, corre:
+
+```bash
+bash gcp/4_ligar_github.sh
+```
+
+No fim, o script mostra 3 valores. Cria-os como **variáveis** do repositório no GitHub, em
+Settings → Secrets and variables → Actions → **Variables**:
+
+- `GCP_PROJECT_ID`
+- `GCP_WIF_PROVIDER`
+- `GCP_DEPLOYER_SA`
+
+Não são segredos. Enquanto não existirem, os pushes só correm os testes e o deploy fica em pausa.
+
+> **Cuidado durante um evento:** um push para o `main` vai para produção em poucos minutos.
+> Em dia de evento, evita fazer push, ou trabalha noutro ramo e só junta ao `main` no fim.
+
 ### Trazer os dados da versão local (opcional)
 
 Envia o ficheiro `marcaserio_checkin.sqlite3` para o Cloud Shell: menu ⋮ → **Upload**.
@@ -128,7 +179,9 @@ Notas:
 
 | Para…                             | Corre no Cloud Shell                                   |
 |-----------------------------------|--------------------------------------------------------|
-| Publicar uma versão nova          | `git pull && bash gcp/2_publicar.sh`                   |
+| Publicar uma versão nova          | `git push` para o `main` (automático); à mão: `git pull && bash gcp/2_publicar.sh` |
+| Voltar à versão anterior          | Consola → Cloud Run → marcaserio-eventos → Revisions → *Manage traffic* |
+| Correr os testes                  | `python3 -m unittest discover tests` (em qualquer computador) |
 | Repor a palavra-passe de admin    | `bash gcp/definir_admin.sh`                            |
 | Ver o estado                      | `bash gcp/verificar.sh`                                |
 | Ver os registos da app            | Consola → Cloud Run → marcaserio-eventos → Logs        |
@@ -153,6 +206,10 @@ Cópias de segurança:
   e não ao resto do projeto.
 
 ## Problemas comuns
+
+- **O GitHub Actions falha na autenticação ou no deploy, com «Permission denied».** Confirma
+  as 3 variáveis `GCP_*` no GitHub e corre de novo `bash gcp/4_ligar_github.sh`. Os registos
+  do passo que falhou indicam a permissão em falta.
 
 - **`gcloud run deploy` falha com um erro de permissões no Cloud Build.** Em projetos recentes,
   o Cloud Build usa a conta de serviço predefinida do Compute Engine. Dá-lhe o papel

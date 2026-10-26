@@ -50,6 +50,7 @@ FIRESTORE_DB = os.environ.get('MA_FIRESTORE_DB', 'marcaserio-eventos')
 PRINT_MODE = os.environ.get('MA_PRINT_MODE', 'local')          # 'local' (lp neste computador) ou 'agente'
 TRUST_PROXY = os.environ.get('MA_TRUST_PROXY', '')             # '', 'google' (Cloud Run) ou 'cloudflare'
 OPEN_BROWSER = os.environ.get('MA_OPEN_BROWSER', '1') == '1'
+VERSION = os.environ.get('MA_VERSION', 'local')                # commit publicado (definido no deploy)
 DATA_DIR = Path(os.environ.get('MA_DATA_DIR', APP_DIR))
 
 PRINTER = 'Honeywell_PC42d_203_FP'
@@ -476,6 +477,13 @@ def route(method, *paths):
             ROUTES[method, path] = fn
         return fn
     return register
+
+
+@route('GET', '/api/estado')
+def api_estado(h):
+    """Verificação depois de cada deploy: versão no ar e base de dados a responder."""
+    return {'ok': True, 'version': VERSION, 'dados': STORE_KIND, 'impressao': PRINT_MODE,
+            'admin_configured': bool(admin_hash())}
 
 
 @route('GET', '/api/session')

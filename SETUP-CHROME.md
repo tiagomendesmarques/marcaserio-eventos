@@ -41,7 +41,9 @@ REGRAS (obrigatórias)
    serviços Cloud Run, App Engine, load balancers, buckets, a base de dados Firestore
    "(default)" ou outras, redes, firewall, permissões existentes). Os scripts só CRIAM:
    o serviço Cloud Run "marcaserio-eventos", a base de dados Firestore "marcaserio-eventos",
-   um agendamento de cópias, a conta de serviço "marcaserio-eventos" e a respetiva permissão.
+   um agendamento de cópias, a conta de serviço "marcaserio-eventos" e a respetiva permissão,
+   e (passo 6) o repositório de imagens "marcaserio-eventos", a conta "marcaserio-deployer",
+   o pool de Workload Identity "github" (se ainda não existir) e o provider "marcaserio-eventos".
 3. Palavras-passe: nunca as inventes, escrevas ou guardes. Quando um comando pedir uma,
    para e diz-me para a escrever eu no terminal.
 4. Se algo falhar 2 vezes seguidas, para e explica-me o erro em vez de improvisar.
@@ -105,7 +107,18 @@ PASSO 5. Domínio
 - O certificado demora entre 15 e 60 minutos. Vai correndo  bash gcp/verificar.sh  de 10 em 10
   minutos até https://eventos.marcaserio.pt/ responder 200.
 
-PASSO 6. Verificação final
+PASSO 6. Publicação automática pelo GitHub
+- bash gcp/4_ligar_github.sh
+- O script mostra 3 valores. No GitHub, em
+  https://github.com/tiagomendesmarques/marcaserio-eventos/settings/variables/actions,
+  cria 3 "Repository variables" (separador Variables, NÃO Secrets) com esses nomes e valores:
+  GCP_PROJECT_ID, GCP_WIF_PROVIDER, GCP_DEPLOYER_SA.
+- Em https://github.com/tiagomendesmarques/marcaserio-eventos/actions, abre o workflow
+  "Publicar no Cloud Run", carrega em "Run workflow" (ramo main) e espera que fique verde.
+  No passo "Verificar" deve aparecer "No ar: ... (versão <commit>)".
+  Se falhar, mostra-me o erro do passo que falhou.
+
+PASSO 7. Verificação final
 - Abre https://eventos.marcaserio.pt: deve aparecer o ecrã "Escolher evento".
 - Abre https://marcaserio.pt e confirma que está igual ao que viste no passo 0.
 - Na Cloudflare → DNS, confirma que o registo A de marcaserio.pt está igual ao do passo 0
@@ -122,4 +135,5 @@ PASSO 6. Verificação final
 - **Trazer os dados da versão local** (opcional): ver «Trazer os dados da versão local» no
   [GUIA-ONLINE.md](GUIA-ONLINE.md).
 - **No dia do evento:** no Mac ligado à Honeywell, abre `Abrir_Agente_Impressao.command`.
-- **Atualizar a app:** no Cloud Shell, corre `cd ~/marcaserio-eventos && git pull && bash gcp/2_publicar.sh`.
+- **Atualizar a app:** basta um `git push` para o `main`; o GitHub Actions testa e publica sozinho.
+  À mão, no Cloud Shell: `cd ~/marcaserio-eventos && git pull && bash gcp/2_publicar.sh`.
