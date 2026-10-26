@@ -59,6 +59,7 @@ async function boot() {
 async function logout() {
   await api('/api/logout', {}).catch(() => {});
   state.me = null;
+  state.leftEvent = false;
   boot();
 }
 
