@@ -1,0 +1,9 @@
+# Dados de participantes: nunca vão para o repositório
+*.sqlite3
+*.sqlite3-*
+copias_seguranca/
+gcp/servidor_*.sqlite3
+
+__pycache__/
+.DS_Store
+._*

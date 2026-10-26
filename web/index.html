@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>marcAsério | Check-in</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+
+<!-- Entrada: escolha de evento, primeira configuração e administração -->
+<section id="auth" class="auth" hidden>
+  <div class="auth-card">
+    <img class="logo" src="/logo.png" alt="marcAsério — The Marketing Powerhouse">
+    <h1 id="authTitle">Escolher evento</h1>
+    <p id="authIntro" class="muted">Escolhe o evento e introduz a respetiva palavra-passe.</p>
+
+    <div id="eventList" class="event-list"></div>
+
+    <form id="eventLogin" class="stack" hidden>
+      <label for="eventPassword">Palavra-passe do evento</label>
+      <input id="eventPassword" type="password" autocomplete="off" required>
+      <button class="btn primary block">Entrar no evento</button>
+    </form>
+
+    <form id="setupAdmin" class="stack" hidden>
+      <label for="setupPassword">Criar palavra-passe de administração</label>
+      <input id="setupPassword" type="password" autocomplete="new-password" placeholder="Mínimo de 10 caracteres" required>
+      <label for="setupPassword2">Confirmar palavra-passe</label>
+      <input id="setupPassword2" type="password" autocomplete="new-password" required>
+      <button class="btn primary block">Configurar administração</button>
+    </form>
+
+    <p id="authStatus" class="status" role="status"></p>
+
+    <div id="adminSection" class="admin">
+      <button type="button" class="link" id="toggleAdmin">Administração de eventos</button>
+
+      <form id="adminLogin" class="stack" hidden>
+        <label for="adminPassword">Palavra-passe de administração</label>
+        <input id="adminPassword" type="password" autocomplete="off" required>
+        <button class="btn primary block">Entrar como administrador</button>
+      </form>
+
+      <div id="adminTools" hidden>
+        <div class="row between">
+          <h2>Gerir eventos</h2>
+          <button type="button" class="btn ghost small" id="adminLogout">Terminar sessão</button>
+        </div>
+        <div id="adminEventList" class="admin-events"></div>
+
+        <form id="createEvent" class="create-event">
+          <h3>Novo evento</h3>
+          <div class="grid2">
+            <div class="wide">
+              <label for="eventName">Nome do evento</label>
+              <input id="eventName" placeholder="Ex.: Well-Being Lisboa 2027" required>
+            </div>
+            <div>
+              <label for="eventDate">Data (opcional)</label>
+              <input id="eventDate" type="date">
+            </div>
+            <div>
+              <label for="newEventPassword">Palavra-passe do evento</label>
+              <input id="newEventPassword" type="password" autocomplete="new-password" placeholder="Mínimo de 8 caracteres" required>
+            </div>
+          </div>
+          <button class="btn primary block">Criar evento</button>
+          <p class="note">As hospedeiras só podem aceder ao evento cuja palavra-passe conhecem.</p>
+        </form>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Evento: lista de participantes, edição e impressão -->
+<main id="app" hidden>
+  <header class="topbar">
+    <div class="brand">
+      <img class="logo" src="/logo.png" alt="marcAsério">
+      <div>
+        <h1 id="eventTitle">Check-in</h1>
+        <p class="muted">Gestão de participantes e acreditação</p>
+      </div>
+    </div>
+    <div class="row">
+      <span class="pill" id="printer"><i class="dot"></i><span id="printerText">Honeywell PC42d · Direct Protocol</span></span>
+      <button type="button" class="btn" id="leaveEvent">Sair do evento</button>
+    </div>
+  </header>
+
+  <section class="stats">
+    <div class="stat"><b id="total">0</b><span>Inscritos</span></div>
+    <div class="stat highlight">
+      <b id="checked">0</b><span>Check-ins efetuados <em id="percent"></em></span>
+      <div class="progress"><i id="progress"></i></div>
+    </div>
+    <div class="stat"><b id="pending">0</b><span>Por chegar</span></div>
+  </section>
+
+  <div class="layout">
+    <section class="panel">
+      <div class="row between">
+        <h2>Participantes</h2>
+        <span id="count" class="muted small"></span>
+      </div>
+      <div class="toolbar">
+        <input type="search" class="search" id="search" placeholder="Pesquisar nome, função ou empresa…" autocomplete="off">
+        <select id="filter">
+          <option value="all">Todos</option>
+          <option value="pending">Por chegar</option>
+          <option value="checked">Já entraram</option>
+        </select>
+        <button type="button" class="btn" id="new">+ Novo participante</button>
+      </div>
+      <div id="list" class="list"></div>
+
+      <details id="importBox" class="drawer">
+        <summary>Importar inscrições</summary>
+        <p class="note">Aceita .xlsx e .csv com colunas Nome, Função e Empresa (também reconhece variantes comuns).
+          Os dados são guardados neste Mac. Importações adicionais não apagam os check-ins existentes.</p>
+        <form id="importForm" class="row">
+          <input type="file" id="file" accept=".xlsx,.csv,text/csv" required>
+          <button class="btn primary">Importar lista</button>
+        </form>
+        <a class="btn" href="/api/export" download>Exportar CSV com check-ins</a>
+
+        <div class="replace">
+          <h3>Lista definitiva · Administração</h3>
+          <p class="note">Substitui <strong>apenas os participantes deste evento</strong>. Elimina também os check-ins
+            atuais deste evento. Antes da substituição, é criada uma cópia de segurança automática.</p>
+          <button type="button" class="btn danger" id="toggleReplace">Substituir lista de participantes</button>
+          <form id="replaceForm" class="stack" hidden>
+            <label for="replacementFile">Nova lista definitiva (.xlsx ou .csv)</label>
+            <input type="file" id="replacementFile" accept=".xlsx,.csv,text/csv" required>
+            <label for="replaceAdminPassword">Palavra-passe de administração</label>
+            <input type="password" id="replaceAdminPassword" autocomplete="off" placeholder="Obrigatória para substituir" required>
+            <button class="btn danger">Confirmar substituição</button>
+          </form>
+        </div>
+      </details>
+    </section>
+
+    <section class="panel editor">
+      <div class="row between">
+        <h2 id="editTitle">Seleciona um participante</h2>
+        <span id="editTag" class="tag" hidden></span>
+      </div>
+      <form id="personForm" class="grid2" autocomplete="off">
+        <div class="wide">
+          <label for="name">Nome</label>
+          <input id="name" placeholder="Nome completo">
+        </div>
+        <div>
+          <label for="role">Função</label>
+          <input id="role" placeholder="Função / cargo">
+        </div>
+        <div>
+          <label for="company">Empresa</label>
+          <input id="company" placeholder="Empresa">
+        </div>
+      </form>
+
+      <div class="badge" aria-label="Pré-visualização do badge">
+        <div class="badge-name" id="prevName">NOME APELIDO</div>
+        <div class="badge-role" id="prevRole">Função</div>
+        <div class="badge-company" id="prevCompany">Empresa</div>
+      </div>
+      <p class="note center">Pré-visualização aproximada · 70 × 40 mm · os acentos são simplificados na impressão.</p>
+
+      <div class="actions">
+        <button type="button" class="btn primary grow" id="checkin">Fazer check-in + Imprimir</button>
+        <button type="button" class="btn" id="save">Guardar dados</button>
+        <button type="button" class="btn" id="reprint">Reimprimir badge</button>
+        <button type="button" class="btn danger" id="undo" hidden>Anular check-in</button>
+      </div>
+      <p class="status" id="status" role="status"></p>
+      <p class="note" id="detail"></p>
+    </section>
+  </div>
+</main>
+
+</body>
+</html>
