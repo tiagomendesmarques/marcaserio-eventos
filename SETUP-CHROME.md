@@ -13,7 +13,7 @@ Chrome, com as tuas sessões iniciadas.
 2. Abre a extensão Claude in Chrome, no ícone da barra do Chrome, e cola o prompt abaixo.
 3. Fica por perto. O Claude vai parar e pedir-te confirmação:
    - antes de criar a VM, porque é aí que começa a ter custos;
-   - para escolheres o projeto GCP;
+   - para confirmares o projeto GCP (`website-marcaserio-pt`);
    - para escreveres tu a palavra-passe de administração, que ele nunca vê.
 
 Demora cerca de 20 a 30 minutos.
@@ -35,9 +35,12 @@ REGRAS (obrigatórias)
    redirecionamentos, Access.
    Se já existir um registo "eventos", NÃO o apagues: mostra-me o tipo e o valor e espera
    pela minha decisão.
-2. GCP: usa só o projeto que eu confirmar. Não alteres recursos que já existam nesse projeto
-   (VMs, redes, regras de firewall, IAM). Pede a minha confirmação antes de criar a VM,
-   porque tem custos (cerca de 10-12 €/mês).
+2. GCP: usa o projeto "website-marcaserio-pt". Esse projeto pode já alojar o site
+   marcaserio.pt, por isso NÃO alteres, pares, reinicies nem apagues nada do que já lá existe
+   (VMs, Cloud Run, App Engine, load balancers, buckets, redes, firewall, IAM, metadados do
+   projeto, Cloud DNS). Só podes criar recursos novos com o nome "marcaserio-eventos"
+   (VM) e "marcaserio-eventos-diario" (snapshots). Pede a minha confirmação antes de
+   criar a VM, porque tem custos (cerca de 10-12 €/mês).
 3. Palavras-passe: nunca as inventes, escrevas ou guardes. Quando um comando pedir uma
    palavra-passe, para e diz-me para a escrever eu no terminal.
 4. Se algo falhar 2 vezes seguidas, para e explica-me o erro em vez de improvisar.
@@ -47,10 +50,14 @@ PASSO 0. Verificação inicial
 - Na Cloudflare, abre a zona marcaserio.pt → DNS → Records. Diz-me se já existe algum registo
   "eventos" (tipo e valor). Não alteres nada.
 
-PASSO 1. Projeto GCP
-- Na consola do Google Cloud, mostra-me os projetos disponíveis e pergunta-me qual usar, ou
-  se queres criar um novo chamado "marcaserio-eventos".
+PASSO 1. Projeto GCP "website-marcaserio-pt"
+- Na consola do Google Cloud, seleciona o projeto "website-marcaserio-pt" e diz-me o
+  ID do projeto (pode ser diferente do nome).
 - Confirma que o projeto tem faturação ativa (Billing). Se não tiver, para e diz-me.
+- Em Compute Engine → VM instances, lista-me as VMs que já existem (só ler). Se já houver
+  uma VM chamada "marcaserio-eventos", para e pergunta-me.
+- Depois de abrires o Cloud Shell (passo 2), confirma com:  gcloud config get-value project
+  que aparece o ID deste projeto. Se não aparecer, corre:  gcloud config set project <ID>
 
 PASSO 2. Código no Cloud Shell
 - Abre o Cloud Shell nesse projeto (ícone ">_" no topo da consola). Corre:
