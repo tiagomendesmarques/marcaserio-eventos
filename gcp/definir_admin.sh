@@ -1,6 +1,5 @@
 #!/bin/bash
-# Define ou repõe a palavra-passe de administração no servidor (pedida no terminal, nunca guardada aqui).
+# Define ou repõe a palavra-passe de administração (pedida no terminal; nunca fica guardada em claro).
 set -euo pipefail
-cd "$(dirname "$0")"
-source config.sh
-gcloud compute ssh "$VM" --zone "$ZONE" --quiet -- -t sudo marcaserio-admin
+source "$(dirname "$0")/config.sh"
+python_firestore "$REPO/marcaserio_checkin.py" --definir-admin

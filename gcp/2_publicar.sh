@@ -1,15 +1,14 @@
 #!/bin/bash
-# Instala ou atualiza a app na VM. Os dados (/var/lib/marcaserio) não são tocados.
+# Constrói e publica a app no Cloud Run (a primeira vez e em cada atualização). Os dados não são tocados.
 set -euo pipefail
-cd "$(dirname "$0")"
-source config.sh
-APP="$(cd .. && pwd)"
+source "$(dirname "$0")/config.sh"
+cd "$REPO"
 
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-TAR="$TMP/marcaserio.tgz"
-COPYFILE_DISABLE=1 tar czf "$TAR" -C "$APP" marcaserio_checkin.py web gcp  # sem ficheiros ._ do macOS
+gcloud run deploy "$SERVICE" --source . --region "$REGION" \
+  --service-account "$SA" --allow-unauthenticated \
+  --set-env-vars "MA_STORE=firestore,MA_FIRESTORE_DB=$DATABASE,MA_PRINT_MODE=agente,MA_PUBLIC_URL=https://$DOMAIN,MA_TRUST_PROXY=google,MA_HOST=0.0.0.0,MA_OPEN_BROWSER=0" \
+  --min-instances 0 --max-instances 3 --cpu 1 --memory 512Mi --concurrency 40 --timeout 60 \
+  --quiet
 
-scp_vm "$TAR" "$VM":/tmp/marcaserio.tgz
-ssh_vm "rm -rf /tmp/marcaserio && mkdir /tmp/marcaserio && tar xzf /tmp/marcaserio.tgz -C /tmp/marcaserio \
-        && sudo bash /tmp/marcaserio/gcp/servidor_instalar.sh '$DOMAIN' && rm -rf /tmp/marcaserio /tmp/marcaserio.tgz"
+echo
+echo "Publicado: $(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')"

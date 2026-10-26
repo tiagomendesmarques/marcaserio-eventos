@@ -1,6 +1,6 @@
-marcAsério | Check-in v1.3
+marcAsério | Check-in v1.4
 
-VERSÃO ONLINE (eventos.marcaserio.pt): ver GUIA-ONLINE.md.
+VERSÃO ONLINE (eventos.marcaserio.pt, Cloud Run + Firestore): ver GUIA-ONLINE.md.
 Sem configuração, a app continua a funcionar como sempre, localmente neste Mac.
 
 INSTALAR LOCALMENTE (a partir da v1.1/v1.2)
@@ -32,14 +32,16 @@ IMPRESSÃO
 A impressão Direct Protocol da v2.6 mantém-se literalmente inalterada.
 
 FICHEIROS
-marcaserio_checkin.py           servidor (Python 3, sem dependências externas)
+marcaserio_checkin.py           servidor (Python 3, sem dependências externas no modo local)
+store_sqlite.py                 dados da versão local (SQLite)
+store_firestore.py              dados da versão online (Firestore)
 web/                            interface (index.html, app.css, app.js, logo)
 agente_impressao.py             versão online: imprime no Mac do evento
 Abrir_Agente_Impressao.command  abre o agente de impressão
-gcp/                            scripts de instalação no Google Cloud + Cloudflare
+gcp/                            scripts de instalação no Google Cloud (Cloud Run)
 SETUP-CHROME.md                 instalação guiada com o Claude in Chrome
 
 Guarda uma cópia de segurança de marcaserio_checkin.sqlite3 regularmente.
 
-ATENÇÃO: O programa funciona apenas neste Mac (127.0.0.1). As passwords não substituem
+ATENÇÃO: A versão local funciona apenas neste Mac (127.0.0.1). As passwords não substituem
 autenticação de rede ou gestão centralizada de utilizadores.

@@ -1,113 +1,117 @@
 # Instalação guiada com o Claude in Chrome
 
 Este ficheiro tem um prompt para colar na extensão **Claude in Chrome**. Com ele, o Claude
-instala a app no GCP e liga `eventos.marcaserio.pt` pela Cloudflare. Tudo é feito no teu
-Chrome, com as tuas sessões iniciadas.
+instala a app no **Cloud Run + Firestore**, no projeto `website-marcaserio-pt`, e liga
+`eventos.marcaserio.pt` pela Cloudflare. Tudo é feito no teu Chrome, com as tuas sessões
+iniciadas. A arquitetura está explicada no [GUIA-ONLINE.md](GUIA-ONLINE.md).
 
 ## Antes de começar
 
 1. Abre o Chrome com sessão iniciada em:
-   - **Google Cloud**: https://console.cloud.google.com, com a conta que vai pagar a VM;
+   - **Google Cloud**: https://console.cloud.google.com;
    - **Cloudflare**: https://dash.cloudflare.com;
    - **GitHub**: https://github.com.
 2. Abre a extensão Claude in Chrome, no ícone da barra do Chrome, e cola o prompt abaixo.
 3. Fica por perto. O Claude vai parar e pedir-te confirmação:
-   - antes de criar a VM, porque é aí que começa a ter custos;
-   - para confirmares o projeto GCP (`website-marcaserio-pt`);
-   - para escreveres tu a palavra-passe de administração, que ele nunca vê.
+   - antes de criar recursos no projeto `website-marcaserio-pt`;
+   - para escreveres tu a palavra-passe de administração, que ele nunca vê;
+   - se encontrar um registo `eventos` que já exista na Cloudflare.
 
-Demora cerca de 20 a 30 minutos.
+Demora cerca de 30 minutos, mais o tempo de emissão do certificado (15 a 60 minutos).
 
 ---
 
 ## Prompt (copiar a partir daqui)
 
 ```text
-Vais instalar a app "marcAsério Check-in" no Google Cloud e publicá-la em
-https://eventos.marcaserio.pt através de um Cloudflare Tunnel. O código está no repositório
-privado github.com/tiagomendesmarques/marcaserio-eventos (lê GUIA-ONLINE.md e a pasta gcp/
-se precisares de detalhes). Trabalha em separadores novos e fala comigo em português.
+Vais publicar a app "marcAsério Check-in" no Google Cloud (Cloud Run + Firestore) e ligá-la a
+https://eventos.marcaserio.pt. O código está no repositório privado
+github.com/tiagomendesmarques/marcaserio-eventos (lê GUIA-ONLINE.md e a pasta gcp/ se
+precisares de detalhes). Trabalha em separadores novos e fala comigo em português.
 
 REGRAS (obrigatórias)
-1. Cloudflare: o domínio marcaserio.pt fica INTACTO. Só podes criar o registo DNS "eventos"
-   (criado pelo próprio túnel). Não edites nem apagues nenhum outro registo (raiz, www, MX,
-   TXT, etc.). Não alteres definições da zona: SSL/TLS, Bot Fight Mode, WAF, regras, cache,
-   redirecionamentos, Access.
-   Se já existir um registo "eventos", NÃO o apagues: mostra-me o tipo e o valor e espera
-   pela minha decisão.
-2. GCP: usa o projeto "website-marcaserio-pt". Esse projeto pode já alojar o site
-   marcaserio.pt, por isso NÃO alteres, pares, reinicies nem apagues nada do que já lá existe
-   (VMs, Cloud Run, App Engine, load balancers, buckets, redes, firewall, IAM, metadados do
-   projeto, Cloud DNS). Só podes criar recursos novos com o nome "marcaserio-eventos"
-   (VM) e "marcaserio-eventos-diario" (snapshots). Pede a minha confirmação antes de
-   criar a VM, porque tem custos (cerca de 10-12 €/mês).
-3. Palavras-passe: nunca as inventes, escrevas ou guardes. Quando um comando pedir uma
-   palavra-passe, para e diz-me para a escrever eu no terminal.
+1. Cloudflare: o registo A de marcaserio.pt (o site atual) NÃO pode ser alterado nem apagado.
+   Só podes CRIAR: o registo TXT de verificação que a Google Search Console pedir, e o
+   registo CNAME "eventos" → ghs.googlehosted.com, com Proxy status "DNS only" (nuvem cinzenta).
+   Não alteres nenhum outro registo nem nenhuma definição da zona (SSL/TLS, Bot Fight Mode,
+   WAF, regras, cache, redirecionamentos).
+   Se já existir um registo "eventos", NÃO o apagues: mostra-me o tipo e o valor e espera.
+2. GCP: usa o projeto "website-marcaserio-pt". Esse projeto pode alojar o site marcaserio.pt,
+   por isso NÃO alteres, pares, reinicies nem apagues nada do que já lá existe (VMs, outros
+   serviços Cloud Run, App Engine, load balancers, buckets, a base de dados Firestore
+   "(default)" ou outras, redes, firewall, permissões existentes). Os scripts só CRIAM:
+   o serviço Cloud Run "marcaserio-eventos", a base de dados Firestore "marcaserio-eventos",
+   um agendamento de cópias, a conta de serviço "marcaserio-eventos" e a respetiva permissão.
+3. Palavras-passe: nunca as inventes, escrevas ou guardes. Quando um comando pedir uma,
+   para e diz-me para a escrever eu no terminal.
 4. Se algo falhar 2 vezes seguidas, para e explica-me o erro em vez de improvisar.
 
-PASSO 0. Verificação inicial
-- Abre https://marcaserio.pt e anota o que aparece (para confirmar no fim que não mudou).
-- Na Cloudflare, abre a zona marcaserio.pt → DNS → Records. Diz-me se já existe algum registo
-  "eventos" (tipo e valor). Não alteres nada.
+PASSO 0. Verificação inicial (só ler)
+- Abre https://marcaserio.pt e anota o que aparece.
+- Na Cloudflare, abre a zona marcaserio.pt → DNS → Records. Anota o registo A de
+  marcaserio.pt (valor e proxy) e diz-me se já existe algum registo "eventos".
+- Na consola do Google Cloud, seleciona o projeto "website-marcaserio-pt". Diz-me o ID do
+  projeto, se a faturação está ativa e se já existe algum serviço Cloud Run ou base de dados
+  Firestore chamado "marcaserio-eventos". Se existir, para e pergunta-me.
+- Pede-me confirmação para avançar.
 
-PASSO 1. Projeto GCP "website-marcaserio-pt"
-- Na consola do Google Cloud, seleciona o projeto "website-marcaserio-pt" e diz-me o
-  ID do projeto (pode ser diferente do nome).
-- Confirma que o projeto tem faturação ativa (Billing). Se não tiver, para e diz-me.
-- Em Compute Engine → VM instances, lista-me as VMs que já existem (só ler). Se já houver
-  uma VM chamada "marcaserio-eventos", para e pergunta-me.
-- Depois de abrires o Cloud Shell (passo 2), confirma com:  gcloud config get-value project
-  que aparece o ID deste projeto. Se não aparecer, corre:  gcloud config set project <ID>
-
-PASSO 2. Código no Cloud Shell
-- Abre o Cloud Shell nesse projeto (ícone ">_" no topo da consola). Corre:
+PASSO 1. Código no Cloud Shell
+- Abre o Cloud Shell no projeto (ícone ">_"). Confirma com:  gcloud config get-value project
+  (se não for o ID certo:  gcloud config set project <ID>). Depois corre:
     ssh-keygen -t ed25519 -N "" -f ~/.ssh/marcaserio_deploy -C cloudshell-marcaserio
     cat ~/.ssh/marcaserio_deploy.pub
 - No GitHub, em https://github.com/tiagomendesmarques/marcaserio-eventos/settings/keys,
-  adiciona uma Deploy key com o título "Cloud Shell" e essa chave pública.
-  NÃO ativas "Allow write access".
+  adiciona uma Deploy key com o título "Cloud Shell" e essa chave pública
+  (SEM "Allow write access").
 - No Cloud Shell:
     GIT_SSH_COMMAND="ssh -i ~/.ssh/marcaserio_deploy -o StrictHostKeyChecking=accept-new" \
       git clone git@github.com:tiagomendesmarques/marcaserio-eventos.git ~/marcaserio-eventos
     cd ~/marcaserio-eventos
     git config core.sshCommand "ssh -i ~/.ssh/marcaserio_deploy"
 
-PASSO 3. Criar a VM (pede-me confirmação antes)
-- No Cloud Shell:  bash gcp/1_criar_vm.sh
-  (cria uma VM e2-micro Debian 12 em europe-southwest1-a, sem portas web abertas,
-  e um snapshot diário do disco)
+PASSO 2. Preparar o projeto
+- bash gcp/1_preparar.sh
+  (ativa as APIs Cloud Run, Firestore, Cloud Build e Artifact Registry; cria a base de dados
+  Firestore "marcaserio-eventos" em europe-west1, as cópias diárias e a conta de serviço)
+- Na consola: Firestore → base de dados "marcaserio-eventos" → Rules. As regras devem
+  negar todo o acesso direto:  allow read, write: if false;
+  Se estiverem diferentes, substitui-as por estas e publica (só nesta base de dados):
+    rules_version = '2';
+    service cloud.firestore {
+      match /databases/{database}/documents {
+        match /{document=**} { allow read, write: if false; }
+      }
+    }
 
-PASSO 4. Instalar a app
-- bash gcp/2_publicar.sh
-- Deve terminar com o serviço "marcaserio-checkin" ativo.
+PASSO 3. Publicar no Cloud Run
+- bash gcp/2_publicar.sh   (demora 3 a 5 minutos; no fim mostra um endereço *.run.app)
+- Se falhar com um erro de permissões do Cloud Build, vê "Problemas comuns" no GUIA-ONLINE.md,
+  aplica a correção indicada e tenta outra vez.
+- Abre o endereço *.run.app num separador: deve aparecer o ecrã "Escolher evento" da marcAsério.
 
-PASSO 5. Palavra-passe de administração
+PASSO 4. Palavra-passe de administração
 - bash gcp/definir_admin.sh
 - Quando aparecer "Nova palavra-passe de administração:", PARA e diz-me para a escrever eu
   (mínimo de 10 caracteres). Continua só quando eu disser.
 
-PASSO 6. Cloudflare Tunnel
-- Na Cloudflare, abre Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared,
-  com o nome "marcaserio-eventos".
-- No passo de instalação aparece "cloudflared service install <TOKEN>". Copia só o token
-  (começa por "eyJ") e corre no Cloud Shell:
-    bash gcp/3_ligar_cloudflare.sh <TOKEN>
-- Espera que o túnel apareça como HEALTHY / Connected.
-- Adiciona um Public Hostname (ou "Published application route"):
-    Subdomain: eventos · Domain: marcaserio.pt · Path: vazio
-    Service Type: HTTP · URL: localhost:8770
-  Se a Cloudflare disser que o registo já existe, PARA e pergunta-me (regra 1).
+PASSO 5. Domínio
+- bash gcp/3_dominio.sh
+- Da primeira vez, o script mostra um link da Google Search Console para verificar
+  marcaserio.pt. Abre-o, escolhe a verificação por registo DNS TXT e cria esse TXT na
+  Cloudflare (regra 1: só um registo novo, sem mexer no A). Conclui a verificação na
+  Search Console e corre de novo:  bash gcp/3_dominio.sh
+- O script mostra o registo a criar. Na Cloudflare, cria:
+    Type: CNAME · Name: eventos · Target: ghs.googlehosted.com · Proxy status: DNS only
+- O certificado demora entre 15 e 60 minutos. Vai correndo  bash gcp/verificar.sh  de 10 em 10
+  minutos até https://eventos.marcaserio.pt/ responder 200.
 
-PASSO 7. Verificação final
-- No Cloud Shell:  bash gcp/verificar.sh
-  Os dois serviços devem aparecer "active"; https://eventos.marcaserio.pt/ deve responder 200.
-- Abre https://eventos.marcaserio.pt num separador novo: deve aparecer o ecrã
-  "Escolher evento" da marcAsério.
+PASSO 6. Verificação final
+- Abre https://eventos.marcaserio.pt: deve aparecer o ecrã "Escolher evento".
 - Abre https://marcaserio.pt e confirma que está igual ao que viste no passo 0.
-- Na Cloudflare → DNS, confirma que o único registo novo é "eventos" (CNAME para
-  ...cfargotunnel.com, Proxied) e que não mudou mais nada.
-- No fim, faz-me um resumo: projeto, VM, zona, estado do túnel, o que foi criado
-  e o que ficou por fazer.
+- Na Cloudflare → DNS, confirma que o registo A de marcaserio.pt está igual ao do passo 0
+  e que os únicos registos novos são o CNAME "eventos" (DNS only) e o TXT de verificação.
+- No fim, faz-me um resumo: o que foi criado, os endereços, o estado do certificado e o que
+  ficou por fazer.
 ```
 
 ---
@@ -115,6 +119,7 @@ PASSO 7. Verificação final
 ## Depois da instalação
 
 - **Criar eventos:** abre https://eventos.marcaserio.pt e entra em **Administração de eventos**.
+- **Trazer os dados da versão local** (opcional): ver «Trazer os dados da versão local» no
+  [GUIA-ONLINE.md](GUIA-ONLINE.md).
 - **No dia do evento:** no Mac ligado à Honeywell, abre `Abrir_Agente_Impressao.command`.
-  Ver o [GUIA-ONLINE.md](GUIA-ONLINE.md).
 - **Atualizar a app:** no Cloud Shell, corre `cd ~/marcaserio-eventos && git pull && bash gcp/2_publicar.sh`.

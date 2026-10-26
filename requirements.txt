@@ -1,0 +1,2 @@
+# Só para a versão online (Cloud Run). A versão local usa apenas a biblioteca padrão do Python.
+google-cloud-firestore==2.34.1

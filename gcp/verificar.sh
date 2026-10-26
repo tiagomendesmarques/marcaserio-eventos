@@ -1,16 +1,16 @@
 #!/bin/bash
-# Verifica o servidor e o domínio. Mostra também o estado de marcaserio.pt, que não deve mudar.
+# Estado do serviço e do domínio. Mostra também marcaserio.pt, que não deve mudar.
 set -uo pipefail
-cd "$(dirname "$0")"
-source config.sh
-ROOT="${DOMAIN#*.}"
+source "$(dirname "$0")/config.sh"
 
-echo; echo "== Serviços na VM"
-ssh_vm 'for s in marcaserio-checkin cloudflared; do printf "%-20s %s\n" "$s" "$(systemctl is-active $s)"; done
-        printf "%-20s %s\n" "app local" "$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8770/)"'
-echo; echo "== Público"
-for url in "https://$DOMAIN/" "https://$ROOT/"; do
-  printf "%-32s %s\n" "$url" "$(curl -s -o /dev/null -w '%{http_code} → %{redirect_url}' --max-time 15 "$url")"
-done
-echo; echo "== DNS de $DOMAIN"
-getent hosts "$DOMAIN" || echo "(ainda sem resolução)"
+URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)' 2>/dev/null)"
+check() { printf "%-42s %s\n" "$1" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$1")"; }
+echo; echo "== HTTP"
+[ -n "$URL" ] && check "$URL/" || echo "Serviço $SERVICE não encontrado em $REGION."
+check "https://$DOMAIN/"
+check "https://$ROOT_DOMAIN/"
+echo; echo "== Mapeamento de domínio"
+gcloud beta run domain-mappings describe --domain "$DOMAIN" --region "$REGION" \
+  --format='value(status.conditions[].type,status.conditions[].status)' 2>/dev/null || echo "(ainda não criado)"
+echo; echo "== DNS"
+for name in "$DOMAIN" "$ROOT_DOMAIN"; do printf "%-24s %s\n" "$name" "$(getent hosts "$name" | awk '{print $1}' | paste -sd' ')"; done

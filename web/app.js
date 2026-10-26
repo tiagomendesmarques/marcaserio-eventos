@@ -1,7 +1,7 @@
 'use strict';
 
 const $ = id => document.getElementById(id);
-const state = { people: [], selected: null, isNew: false, busy: false, chosenEvent: null };
+const state = { people: [], selected: null, isNew: false, busy: false, chosenEvent: null, version: null, since: 0 };
 
 const clean = v => String(v ?? '').trim();
 const escapeHTML = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -175,6 +175,7 @@ function showApp(event) {
   document.title = `${event.name} | marcAsério Check-in`;
   state.selected = null;
   state.isNew = false;
+  state.version = null;
   refresh().catch(e => notify(e.message, true));
 }
 
@@ -187,18 +188,31 @@ $('leaveEvent').onclick = async () => {
 const currentPerson = () => state.people.find(p => p.id === state.selected);
 const formValues = () => ({ name: clean($('name').value), role: clean($('role').value), company: clean($('company').value) });
 
-/** Atualiza lista, contadores e impressora sem tocar no formulário. */
+const byName = (a, b) => a.name.localeCompare(b.name, 'pt', { sensitivity: 'base' }) || (a.id < b.id ? -1 : 1);
+
+/** Atualiza lista, contadores e impressora sem tocar no formulário.
+ *  Depois da primeira vez, só pede o que mudou (online, poupa leituras ao Firestore). */
 async function loadPeople() {
-  const d = await api('/api/people');
-  state.people = d.people;
-  const pct = d.total ? Math.round(d.checked / d.total * 100) : 0;
-  $('total').textContent = d.total;
-  $('checked').textContent = d.checked;
-  $('pending').textContent = d.total - d.checked;
-  $('percent').textContent = d.total ? `· ${pct}%` : '';
+  const query = state.version ? `?v=${encodeURIComponent(state.version)}&since=${state.since}` : '';
+  const d = await api('/api/people' + query);
+  if (d.full) {
+    state.people = d.people.sort(byName);
+  } else if (d.people.length) {
+    const changed = new Set(d.people.map(p => p.id));
+    state.people = state.people.filter(p => !changed.has(p.id)).concat(d.people).sort(byName);
+  }
+  state.version = d.version;
+  state.since = d.now - 30;  // margem para escritas de outros contentores ainda a caminho
+
+  const total = state.people.length, checked = state.people.filter(p => p.checked_at).length;
+  const pct = total ? Math.round(checked / total * 100) : 0;
+  $('total').textContent = total;
+  $('checked').textContent = checked;
+  $('pending').textContent = total - checked;
+  $('percent').textContent = total ? `· ${pct}%` : '';
   $('progress').style.width = pct + '%';
   showPrinter(d.printer);
-  return d;
+  return total;
 }
 
 /** Modo online: o estado vem do agente de impressão no local do evento. */
@@ -213,8 +227,7 @@ function showPrinter(p) {
 }
 
 async function refresh() {
-  const d = await loadPeople();
-  if (!d.total) $('importBox').open = true;
+  if (!await loadPeople()) $('importBox').open = true;
 
   if (currentPerson()) select(state.selected);
   else if (!state.isNew && state.people.length) select(state.people[0].id);
@@ -393,6 +406,7 @@ $('replaceForm').onsubmit = async e => {
       $('replaceForm').hidden = true;
       state.selected = null;
       state.isNew = false;
+      state.version = null;
       await refresh();
       notify(d.message);
     } catch (err) { notify(err.message, true); }

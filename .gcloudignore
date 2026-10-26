@@ -1,0 +1,14 @@
+# Ficheiros enviados para o Cloud Build em «gcloud run deploy --source». Nunca enviar dados.
+.git
+.gitignore
+.gcloudignore
+gcp/
+*.md
+LEIA-ME.txt
+agente_impressao.py
+*.command
+*.sqlite3
+*.sqlite3-*
+copias_seguranca/
+__pycache__/
+.DS_Store

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""marcAsério | Check-in — servidor local de acreditação multi-evento.
+"""marcAsério | Check-in — acreditação de eventos, multi-evento.
 
 Cada evento tem a sua palavra-passe; a administração (criar eventos, alterar
 palavras-passe, substituir listas) tem uma palavra-passe própria.
 
 Corre de duas formas, escolhidas por variáveis de ambiente:
-  • local (por omissão): num Mac ligado à Honeywell, como até aqui;
-  • online: num servidor (ex.: GCP atrás de Cloudflare Tunnel), com MA_PRINT_MODE=agente;
+  • local (por omissão): num Mac ligado à Honeywell, dados em SQLite, como até aqui;
+  • online: no Cloud Run, com MA_STORE=firestore e MA_PRINT_MODE=agente;
     as etiquetas ficam numa fila que o agente_impressao.py, no Mac do evento, imprime.
 
 O bloco de impressão Direct Protocol (ascii_text, badge_layout, dp_commands,
@@ -23,45 +23,40 @@ import os
 import posixpath
 import re
 import secrets
-import sqlite3
 import subprocess
 import sys
 import threading
 import time
 import unicodedata
-import uuid
 import webbrowser
 import zipfile
-from contextlib import contextmanager
-from datetime import datetime
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from xml.etree import ElementTree as ET
 
+from store_sqlite import AlreadyCheckedIn, SqliteStore
+
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / 'web'
 
 # Configuração por variáveis de ambiente; os valores por omissão são os do modo local.
 HOST = os.environ.get('MA_HOST', '127.0.0.1')
-PORT = int(os.environ.get('MA_PORT', '8770'))
+PORT = int(os.environ.get('MA_PORT') or os.environ.get('PORT') or 8770)  # PORT: definido pelo Cloud Run
 PUBLIC_URL = os.environ.get('MA_PUBLIC_URL', '').rstrip('/')  # ex.: https://eventos.marcaserio.pt
+STORE_KIND = os.environ.get('MA_STORE', 'sqlite')              # 'sqlite' ou 'firestore'
+FIRESTORE_DB = os.environ.get('MA_FIRESTORE_DB', 'marcaserio-eventos')
 PRINT_MODE = os.environ.get('MA_PRINT_MODE', 'local')          # 'local' (lp neste computador) ou 'agente'
-TRUST_PROXY = os.environ.get('MA_TRUST_PROXY') == '1'          # IP real via CF-Connecting-IP (Cloudflare)
+TRUST_PROXY = os.environ.get('MA_TRUST_PROXY', '')             # '', 'google' (Cloud Run) ou 'cloudflare'
 OPEN_BROWSER = os.environ.get('MA_OPEN_BROWSER', '1') == '1'
 DATA_DIR = Path(os.environ.get('MA_DATA_DIR', APP_DIR))
 
 PRINTER = 'Honeywell_PC42d_203_FP'
 WIDTH, HEIGHT = 560, 320
 
-DB_PATH = DATA_DIR / 'marcaserio_checkin.sqlite3'
-LEGACY_DB = DATA_DIR / 'checkin_people_finance.sqlite3'
-BACKUP_DIR = DATA_DIR / 'copias_seguranca'
-ORIGINS = {f'http://127.0.0.1:{PORT}', PUBLIC_URL} - {''}
+LOCAL_ORIGIN = f'http://127.0.0.1:{PORT}'
 SECURE_COOKIE = PUBLIC_URL.startswith('https://')
-
-LEGACY_EVENT_ID = 'legacy-people-finance'
 NO_PASSWORD = '!password-not-set!'
 SESSION_COOKIE = 'ma_session'
 SESSION_TTL = 12 * 3600
@@ -78,102 +73,27 @@ STATIC = {
     '/logo.png': ('logo_marcaserio.png', 'image/png'),
 }
 
-LOCK = threading.RLock()
-SESSIONS = {}
-FAILURES = {}  # IP → instantes das tentativas falhadas recentes
+STORE = None              # definido em open_store()
+IMPORT_LOCK = threading.Lock()
+_SECRET = None
 
 
-# ── Base de dados ────────────────────────────────────────────────────────────
-
-@contextmanager
-def database():
-    """Ligação numa transação: commit no fim, rollback em erro, fecho sempre."""
-    db = sqlite3.connect(DB_PATH, timeout=20)
-    db.row_factory = sqlite3.Row
-    try:
-        with db:
-            yield db
-    finally:
-        db.close()
-
-
-def copy_sqlite(source_uri, target):
-    source, dest = sqlite3.connect(source_uri, uri=True), sqlite3.connect(target)
-    try:
-        source.backup(dest)
-    finally:
-        source.close()
-        dest.close()
-
-
-def backup_database(prefix):
-    BACKUP_DIR.mkdir(exist_ok=True)
-    path = BACKUP_DIR / f'{prefix}_{datetime.now():%Y%m%d_%H%M%S}_{secrets.token_hex(4)}.sqlite3'
-    copy_sqlite(DB_PATH.as_uri(), path)
-    return path
-
-
-def now():
-    return datetime.now().astimezone().isoformat(timespec='seconds')
-
-
-def init_db():
-    # A base de dados original da v2.6 nunca é editada: faz-se uma cópia de trabalho única.
-    if not DB_PATH.exists() and LEGACY_DB.exists():
-        copy_sqlite(LEGACY_DB.as_uri() + '?mode=ro', DB_PATH)
-    with database() as db:
-        db.execute('''CREATE TABLE IF NOT EXISTS people (
-            id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL DEFAULT '',
-            company TEXT NOT NULL DEFAULT '', checked_at TEXT, created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'manual')''')
-        db.execute('''CREATE TABLE IF NOT EXISTS events (
-            id TEXT PRIMARY KEY, name TEXT NOT NULL, event_date TEXT NOT NULL DEFAULT '',
-            password_hash TEXT NOT NULL, created_at TEXT NOT NULL)''')
-        db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
-        db.execute('''CREATE TABLE IF NOT EXISTS print_jobs (
-            id TEXT PRIMARY KEY, event_id TEXT NOT NULL, label TEXT NOT NULL, data BLOB NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending', error TEXT NOT NULL DEFAULT '',
-            created_ts REAL NOT NULL, updated_ts REAL NOT NULL)''')
-        db.execute('CREATE INDEX IF NOT EXISTS ix_jobs_event ON print_jobs(event_id, status, created_ts)')
-        if 'event_id' not in {row['name'] for row in db.execute('PRAGMA table_info(people)')}:
-            db.execute('ALTER TABLE people ADD COLUMN event_id TEXT')
-        db.execute('CREATE INDEX IF NOT EXISTS ix_people_event ON people(event_id)')
-        db.execute('CREATE INDEX IF NOT EXISTS ix_people_name ON people(name)')
-        # Participantes antigos (sem evento) pertencem apenas ao evento original.
-        if db.execute('SELECT 1 FROM people WHERE event_id IS NULL LIMIT 1').fetchone():
-            db.execute('INSERT OR IGNORE INTO events(id,name,event_date,password_hash,created_at) VALUES (?,?,?,?,?)',
-                       (LEGACY_EVENT_ID, 'People & Finance Forum 2026', '2026-10-15', NO_PASSWORD, now()))
-            db.execute('UPDATE people SET event_id=? WHERE event_id IS NULL', (LEGACY_EVENT_ID,))
-
-
-def list_events():
-    with database() as db:
-        return [dict(r) for r in db.execute('SELECT id,name,event_date FROM events ORDER BY event_date DESC,name')]
-
-
-def list_events_with_stats():
-    with database() as db:
-        rows = db.execute('''SELECT e.id, e.name, e.event_date, e.password_hash<>? AS has_password,
-                                    COUNT(p.id) AS total, COUNT(p.checked_at) AS checked
-                             FROM events e LEFT JOIN people p ON p.event_id=e.id
-                             GROUP BY e.id ORDER BY e.event_date DESC, e.name''', (NO_PASSWORD,))
-        return [dict(r) for r in rows]
-
-
-def get_event(event_id):
-    with database() as db:
-        row = db.execute('SELECT * FROM events WHERE id=?', (event_id,)).fetchone()
-    return dict(row) if row else None
+def open_store():
+    global STORE
+    if STORE_KIND == 'firestore':
+        if PRINT_MODE == 'local':
+            raise SystemExit('Com MA_STORE=firestore, usa MA_PRINT_MODE=agente.')
+        from store_firestore import FirestoreStore  # só é preciso online
+        STORE = FirestoreStore(os.environ.get('GOOGLE_CLOUD_PROJECT'), FIRESTORE_DB, NO_PASSWORD)
+    else:
+        STORE = SqliteStore(DATA_DIR / 'marcaserio_checkin.sqlite3', DATA_DIR / 'checkin_people_finance.sqlite3',
+                            DATA_DIR / 'copias_seguranca', NO_PASSWORD)
+    STORE.init()
+    return STORE
 
 
 def public_event(event):
-    return {'id': event['id'], 'name': event['name'], 'event_date': event['event_date']}
-
-
-def event_people(event_id):
-    with database() as db:
-        return [dict(r) for r in db.execute(
-            'SELECT * FROM people WHERE event_id=? ORDER BY name COLLATE NOCASE,id', (event_id,))]
+    return {'id': event['id'], 'name': event['name'], 'event_date': event.get('event_date', '')}
 
 
 # ── Palavras-passe e sessões ─────────────────────────────────────────────────
@@ -194,9 +114,7 @@ def check_password(password, stored):
 
 
 def admin_hash():
-    with database() as db:
-        row = db.execute("SELECT value FROM settings WHERE key='admin_password'").fetchone()
-    return row['value'] if row else None
+    return STORE.get_setting('admin_password')
 
 
 def require_admin_password(password, error='Palavra-passe de administração incorreta.'):
@@ -205,47 +123,68 @@ def require_admin_password(password, error='Palavra-passe de administração inc
         raise PermissionError(error)
 
 
-def set_admin_password(password):
+def set_admin_password(password, only_if_absent=False):
     if len(password) < ADMIN_MIN_PASSWORD:
         raise ValueError(f'A palavra-passe de administração deve ter pelo menos {ADMIN_MIN_PASSWORD} caracteres.')
-    with LOCK, database() as db:
-        db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES ('admin_password',?)", (hash_password(password),))
+    return STORE.set_setting('admin_password', hash_password(password), only_if_absent=only_if_absent)
 
 
 def check_attempts(ip):
-    with LOCK:
-        recent = [t for t in FAILURES.get(ip, []) if t > time.time() - LOGIN_WINDOW]
-        FAILURES[ip] = recent
-        if len(recent) >= LOGIN_MAX_FAILURES:
-            raise PermissionError('Demasiadas tentativas falhadas. Tenta novamente dentro de 15 minutos.')
+    if STORE.recent_failures(ip, LOGIN_WINDOW) >= LOGIN_MAX_FAILURES:
+        raise PermissionError('Demasiadas tentativas falhadas. Tenta novamente dentro de 15 minutos.')
 
 
-def note_failure(ip):
-    with LOCK:
-        FAILURES.setdefault(ip, []).append(time.time())
+# As sessões são cookies assinados (nada fica em memória), para funcionarem com
+# vários contentores. Levam a impressão digital da palavra-passe: mudá-la termina-as.
+
+def _b64(data):
+    return base64.urlsafe_b64encode(data).rstrip(b'=').decode()
 
 
-def new_session(kind, event_id=None):
-    token = secrets.token_urlsafe(32)
-    with LOCK:
-        SESSIONS[token] = {'kind': kind, 'event_id': event_id, 'expires': time.time() + SESSION_TTL}
-    return token
+def _unb64(text):
+    return base64.urlsafe_b64decode(text + '=' * (-len(text) % 4))
 
 
-def get_session(token):
-    with LOCK:
-        entry = SESSIONS.get(token)
-        if entry and entry['expires'] < time.time():
-            del SESSIONS[token]
+def _fingerprint(password_hash):
+    return hashlib.sha256(password_hash.encode()).hexdigest()[:16]
+
+
+def session_secret():
+    global _SECRET
+    if not _SECRET:
+        STORE.set_setting('session_secret', secrets.token_hex(32), only_if_absent=True)
+        _SECRET = STORE.get_setting('session_secret').encode()
+    return _SECRET
+
+
+def _signature(payload):
+    return _b64(hmac.new(session_secret(), payload.encode(), 'sha256').digest())
+
+
+def new_session(kind, password_hash, event_id=None):
+    payload = _b64(json.dumps({'k': kind, 'e': event_id, 'x': int(time.time() + SESSION_TTL),
+                               'f': _fingerprint(password_hash)}).encode())
+    return f'{payload}.{_signature(payload)}'
+
+
+def read_session(token):
+    """Devolve {'kind', 'event'} se o cookie for válido e a palavra-passe não tiver mudado."""
+    try:
+        payload, signature = token.split('.')
+        if not hmac.compare_digest(signature, _signature(payload)):
             return None
-        return entry
-
-
-def end_event_sessions(event_id):
-    with LOCK:
-        for token, sess in list(SESSIONS.items()):
-            if sess['kind'] == 'event' and sess['event_id'] == event_id:
-                del SESSIONS[token]
+        data = json.loads(_unb64(payload))
+    except (AttributeError, ValueError, TypeError):
+        return None
+    if data['x'] < time.time():
+        return None
+    if data['k'] == 'admin':
+        stored = admin_hash()
+        return {'kind': 'admin', 'event': None} if stored and _fingerprint(stored) == data['f'] else None
+    event = STORE.get_event(data['e'])
+    if not event or _fingerprint(event['password_hash']) != data['f']:
+        return None
+    return {'kind': 'event', 'event': event}
 
 
 # ── Impressão Direct Protocol (preservado literalmente da v2.6) ──────────────
@@ -330,18 +269,15 @@ def print_badge(name, role='', company=''):
 
 JOB_MAX_AGE = 15 * 60  # etiquetas por imprimir há mais tempo do que isto já não saem
 AGENT_TIMEOUT = 45     # segundos sem contacto até a impressora aparecer como desligada
-AGENTS = {}            # event_id → último contacto do agente
 JOBS_READY = threading.Condition()
 
 
-def send_badge(db, event_id, name, role, company):
-    """Imprime já (modo local) ou põe a etiqueta na fila do evento, na mesma transação."""
+def badge(name, role, company):
+    """Imprime já (modo local) ou devolve os comandos para a fila do evento (modo agente)."""
     if PRINT_MODE == 'local':
         print_badge(name, role, company)
-        return
-    t = time.time()
-    db.execute('INSERT INTO print_jobs(id,event_id,label,data,created_ts,updated_ts) VALUES (?,?,?,?,?,?)',
-               (str(uuid.uuid4()), event_id, name, dp_commands(name, role, company), t, t))
+        return None
+    return dp_commands(name, role, company)
 
 
 def wake_agents():
@@ -349,51 +285,28 @@ def wake_agents():
         JOBS_READY.notify_all()
 
 
-def claim_job(event_id):
-    t = time.time()
-    with LOCK, database() as db:
-        db.execute("UPDATE print_jobs SET status='expired',updated_ts=? WHERE event_id=? AND status='pending' AND created_ts<?",
-                   (t, event_id, t - JOB_MAX_AGE))
-        job = db.execute("SELECT id,label,data FROM print_jobs WHERE event_id=? AND status='pending' ORDER BY created_ts LIMIT 1",
-                         (event_id,)).fetchone()
-        if job:
-            db.execute("UPDATE print_jobs SET status='sent',updated_ts=? WHERE id=?", (t, job['id']))
-    return job
+def next_job(event, wait=20):
+    """Long-poll: devolve a próxima etiqueta do evento, ou None ao fim de `wait` segundos.
 
-
-def next_job(event_id, wait=25):
-    """Long-poll: devolve a próxima etiqueta do evento, ou None ao fim de `wait` segundos."""
+    Procura a cada segundo (pode ter sido criada noutro contentor) e acorda logo
+    quando o check-in acontece neste.
+    """
     deadline = time.time() + wait
-    with JOBS_READY:
-        while True:
-            AGENTS[event_id] = time.time()
-            job = claim_job(event_id)
-            remaining = deadline - time.time()
-            if job or remaining <= 0:
-                return job
-            JOBS_READY.wait(remaining)
+    while True:
+        STORE.agent_seen(event)
+        job = STORE.claim_job(event, JOB_MAX_AGE)
+        remaining = deadline - time.time()
+        if job or remaining <= 0:
+            return job
+        with JOBS_READY:
+            JOBS_READY.wait(min(1.0, remaining))
 
 
-def finish_job(event_id, job_id, error):
-    with LOCK, database() as db:
-        db.execute("UPDATE print_jobs SET status=?,error=?,updated_ts=? WHERE id=? AND event_id=? AND status='sent'",
-                   ('error' if error else 'done', error[:300], time.time(), job_id, event_id))
-
-
-def agent_online(event_id):
-    return time.time() - AGENTS.get(event_id, 0) < AGENT_TIMEOUT
-
-
-def printer_status(event_id):
+def printer_status(event):
     if PRINT_MODE == 'local':
         return {'mode': 'local'}
-    with database() as db:
-        pending = db.execute("SELECT COUNT(*) FROM print_jobs WHERE event_id=? AND status='pending' AND created_ts>=?",
-                             (event_id, time.time() - JOB_MAX_AGE)).fetchone()[0]
-        last = db.execute("SELECT status,error FROM print_jobs WHERE event_id=? AND status IN ('done','error') "
-                          "ORDER BY updated_ts DESC LIMIT 1", (event_id,)).fetchone()
-    return {'mode': 'agente', 'online': agent_online(event_id), 'pending': pending,
-            'error': last['error'] if last and last['status'] == 'error' else ''}
+    pending, error, last_seen = STORE.printer_info(event, JOB_MAX_AGE)
+    return {'mode': 'agente', 'online': time.time() - last_seen < AGENT_TIMEOUT, 'pending': pending, 'error': error}
 
 
 # ── Importação de listas (.xlsx / .csv) ──────────────────────────────────────
@@ -527,83 +440,34 @@ def parse_people(blob, filename):
     return people, skipped
 
 
-def insert_people(db, event_id, people):
-    t = now()
-    db.executemany('INSERT INTO people(id,name,role,company,created_at,updated_at,source,event_id) VALUES (?,?,?,?,?,?,?,?)',
-                   [(str(uuid.uuid4()), name, role, company, t, t, 'import', event_id) for name, role, company in people])
-
-
-def import_people(event_id, blob, filename):
+def import_people(event, blob, filename):
     """Acrescenta participantes novos; os existentes (e os seus check-ins) mantêm-se."""
     people, skipped = parse_people(blob, filename)
-    with LOCK, database() as db:
-        existing = {person_key(r['name'], r['company'])
-                    for r in db.execute('SELECT name,company FROM people WHERE event_id=?', (event_id,))}
+    with IMPORT_LOCK:
+        existing = {person_key(name, company) for name, company in STORE.person_keys(event)}
         new = [p for p in people if person_key(p[0], p[2]) not in existing]
-        insert_people(db, event_id, new)
+        STORE.add_people(event, new)
     return len(new), skipped + len(people) - len(new)
 
 
-def replace_people(event_id, blob, filename, admin_password):
+def replace_people(event, blob, filename, admin_password):
     """Substitui a lista (e os check-ins) deste evento, com cópia de segurança prévia."""
     require_admin_password(admin_password, 'Palavra-passe de administração incorreta. A lista não foi alterada.')
     people, skipped = parse_people(blob, filename)
-    with LOCK:
-        backup = backup_database('antes_substituir')
-        with database() as db:
-            old_count = db.execute('SELECT COUNT(*) FROM people WHERE event_id=?', (event_id,)).fetchone()[0]
-            db.execute('DELETE FROM people WHERE event_id=?', (event_id,))
-            insert_people(db, event_id, people)
-    return old_count, len(people), skipped, backup.name
-
-
-# ── Ações sobre participantes ────────────────────────────────────────────────
-
-def person_action(action, event_id, data):
-    pid = data.get('id')
-    with LOCK, database() as db:
-        old = db.execute('SELECT * FROM people WHERE id=? AND event_id=?', (pid, event_id)).fetchone() if pid else None
-        if pid and not old:
-            raise ValueError('Participante não encontrado neste evento. Atualiza a página.')
-        t = now()
-
-        if action == 'undo':
-            if not old:
-                raise ValueError('Seleciona um participante.')
-            db.execute('UPDATE people SET checked_at=NULL,updated_at=? WHERE id=?', (t, pid))
-            return {'message': 'Check-in anulado.', 'id': pid}
-
-        name, role, company = safe_fields(data)
-
-        if action == 'reprint':
-            if not old:
-                raise ValueError('Guarda primeiro o participante.')
-            send_badge(db, event_id, name, role, company)
-            db.execute('UPDATE people SET name=?,role=?,company=?,updated_at=? WHERE id=?', (name, role, company, t, pid))
-            return {'message': 'Badge enviado para reimpressão.', 'id': pid}
-
-        if action == 'checkin':
-            if old and old['checked_at']:
-                raise ValueError('Este participante já fez check-in. Usa Reimprimir badge.')
-            send_badge(db, event_id, name, role, company)
-            checked_at = t
-        else:
-            checked_at = old['checked_at'] if old else None
-
-        if old:
-            db.execute('UPDATE people SET name=?,role=?,company=?,checked_at=?,updated_at=? WHERE id=?',
-                       (name, role, company, checked_at, t, pid))
-        else:
-            pid = str(uuid.uuid4())
-            db.execute('INSERT INTO people(id,name,role,company,checked_at,created_at,updated_at,source,event_id) VALUES (?,?,?,?,?,?,?,?,?)',
-                       (pid, name, role, company, checked_at, t, t, 'walk-in', event_id))
-    message = 'Check-in registado e etiqueta enviada para a fila.' if action == 'checkin' else 'Dados guardados.'
-    return {'message': message, 'id': pid}
+    with IMPORT_LOCK:
+        old_count, backup = STORE.replace_people(event, people)
+    return old_count, len(people), skipped, backup
 
 
 # ── API HTTP ─────────────────────────────────────────────────────────────────
 
 ROUTES = {}
+PERSON_MESSAGES = {
+    'save': 'Dados guardados.',
+    'checkin': 'Check-in registado e etiqueta enviada para a fila.',
+    'reprint': 'Badge enviado para reimpressão.',
+    'undo': 'Check-in anulado.',
+}
 
 
 def route(method, *paths):
@@ -617,48 +481,45 @@ def route(method, *paths):
 @route('GET', '/api/session')
 def api_session(h):
     sess = h.session
-    event = get_event(sess['event_id']) if sess and sess['kind'] == 'event' else None
     return {'admin_configured': bool(admin_hash()),
             'is_admin': bool(sess and sess['kind'] == 'admin'),
-            'event': public_event(event) if event else None}
+            'event': public_event(sess['event']) if sess and sess['event'] else None}
 
 
 @route('GET', '/api/events')
 def api_events(h):
-    return {'events': list_events()}
+    return {'events': STORE.list_events()}
 
 
 @route('GET', '/api/admin/events')
 def api_admin_events(h):
     h.require('admin')
-    return {'events': list_events_with_stats()}
+    return {'events': STORE.list_events_with_stats()}
 
 
 @route('GET', '/api/people')
 def api_people(h):
-    event_id = h.require('event')['event_id']
-    people = event_people(event_id)
-    return {'people': people, 'total': len(people), 'checked': sum(bool(p['checked_at']) for p in people),
-            'printer': printer_status(event_id)}
+    """Lista do evento. Com ?v=<versão>&since=<instante>, só o que mudou desde então."""
+    event = h.require('event')['event']
+    version, full, people = STORE.people(event, h.param('v'), h.param('since'))
+    return {'version': version, 'full': full, 'people': people, 'now': time.time(), 'printer': printer_status(event)}
 
 
 @route('GET', '/api/export')
 def api_export(h):
-    event_id = h.require('event')['event_id']
+    event = h.require('event')['event']
     out = io.StringIO()
     writer = csv.writer(out, delimiter=';')
     writer.writerow(['Nome', 'Função', 'Empresa', 'Check-in', 'Data/hora', 'Origem'])
-    for p in event_people(event_id):
+    for p in STORE.people(event)[2]:
         writer.writerow([p['name'], p['role'], p['company'], 'Sim' if p['checked_at'] else 'Não', p['checked_at'] or '', p['source']])
-    slug = re.sub(r'[^a-z0-9]+', '_', norm(get_event(event_id)['name'])).strip('_') or 'evento'
+    slug = re.sub(r'[^a-z0-9]+', '_', norm(event['name'])).strip('_') or 'evento'
     h.send(200, ('﻿' + out.getvalue()).encode('utf-8'), 'text/csv; charset=utf-8',
            [('Content-Disposition', f'attachment; filename="checkins_{slug}.csv"')])
 
 
 @route('POST', '/api/logout')
 def api_logout(h):
-    with LOCK:
-        SESSIONS.pop(h.token, None)
     return {'message': 'Sessão terminada.'}, ''
 
 
@@ -666,28 +527,26 @@ def api_logout(h):
 def api_setup_admin(h):
     if PUBLIC_URL:
         # Online, quem abrisse o site primeiro ficaria com a administração.
-        raise PermissionError('Na versão online, a palavra-passe de administração define-se no servidor: sudo marcaserio-admin')
-    with LOCK:
-        if admin_hash():
-            raise PermissionError('Administração já configurada.')
-        set_admin_password(str(h.data.get('password', '')))
-    return {'message': 'Administração configurada.'}, new_session('admin')
+        raise PermissionError('Na versão online, a palavra-passe de administração define-se com: bash gcp/definir_admin.sh')
+    if not set_admin_password(str(h.data.get('password', '')), only_if_absent=True):
+        raise PermissionError('Administração já configurada.')
+    return {'message': 'Administração configurada.'}, new_session('admin', admin_hash())
 
 
 @route('POST', '/api/login-admin')
 def api_login_admin(h):
     require_admin_password(str(h.data.get('password', '')))
-    return {'message': 'Autenticado.'}, new_session('admin')
+    return {'message': 'Autenticado.'}, new_session('admin', admin_hash())
 
 
 @route('POST', '/api/login-event')
 def api_login_event(h):
-    event = get_event(str(h.data.get('event_id', '')))
+    event = STORE.get_event(str(h.data.get('event_id', '')))
     if event and event['password_hash'] == NO_PASSWORD:
         raise PermissionError('Este evento ainda não tem palavra-passe. Define-a em Administração de eventos.')
     if not event or not check_password(str(h.data.get('password', '')), event['password_hash']):
         raise PermissionError('Palavra-passe do evento incorreta.')
-    return {'event': public_event(event)}, new_session('event', event['id'])
+    return {'event': public_event(event)}, new_session('event', event['password_hash'], event['id'])
 
 
 @route('POST', '/api/admin/create-event')
@@ -702,11 +561,7 @@ def api_create_event(h):
         raise ValueError('Data inválida.')
     if len(password) < EVENT_MIN_PASSWORD:
         raise ValueError(f'A palavra-passe do evento deve ter pelo menos {EVENT_MIN_PASSWORD} caracteres.')
-    event_id = str(uuid.uuid4())
-    with LOCK, database() as db:
-        db.execute('INSERT INTO events(id,name,event_date,password_hash,created_at) VALUES (?,?,?,?,?)',
-                   (event_id, name, date, hash_password(password), now()))
-    return {'message': 'Evento criado.', 'id': event_id}
+    return {'message': 'Evento criado.', 'id': STORE.create_event(name, date, hash_password(password))}
 
 
 @route('POST', '/api/admin/change-password')
@@ -715,50 +570,50 @@ def api_change_password(h):
     event_id, password = str(h.data.get('event_id', '')), str(h.data.get('password', ''))
     if len(password) < EVENT_MIN_PASSWORD:
         raise ValueError(f'A palavra-passe deve ter pelo menos {EVENT_MIN_PASSWORD} caracteres.')
-    with LOCK, database() as db:
-        if not db.execute('UPDATE events SET password_hash=? WHERE id=?', (hash_password(password), event_id)).rowcount:
-            raise ValueError('Evento não encontrado.')
-    end_event_sessions(event_id)
+    if not STORE.set_event_password(event_id, hash_password(password)):
+        raise ValueError('Evento não encontrado.')
     return {'message': 'Palavra-passe alterada. As sessões anteriores deste evento foram terminadas.'}
 
 
 @route('POST', '/api/save', '/api/checkin', '/api/reprint', '/api/undo')
 def api_person(h):
-    action, event_id = h.path_only.rsplit('/', 1)[-1], h.require('event')['event_id']
-    result = person_action(action, event_id, h.data)
+    action, event = h.path_only.rsplit('/', 1)[-1], h.require('event')['event']
+    fields = None if action == 'undo' else safe_fields(h.data)
+    pid = STORE.person_action(event, action, str(h.data.get('id') or '') or None, fields, badge)
+    message = PERSON_MESSAGES[action]
     if PRINT_MODE != 'local' and action in ('checkin', 'reprint'):
         wake_agents()
-        if not agent_online(event_id):
-            result['message'] += ' Atenção: a impressora do evento está desligada; a etiqueta fica em fila durante 15 minutos.'
-    return result
+        if not printer_status(event)['online']:
+            message += ' Atenção: a impressora do evento está desligada; a etiqueta fica em fila durante 15 minutos.'
+    return {'message': message, 'id': pid}
 
 
 @route('GET', '/api/print/next')
 def api_print_next(h):
     if PRINT_MODE == 'local':
         raise ValueError('Este servidor imprime diretamente (modo local).')
-    job = next_job(h.require('event')['event_id'])
+    job = next_job(h.require('event')['event'])
     return {'job': job and {'id': job['id'], 'label': job['label'], 'data': base64.b64encode(job['data']).decode()}}
 
 
 @route('POST', '/api/print/result')
 def api_print_result(h):
-    finish_job(h.require('event')['event_id'], str(h.data.get('id', '')), str(h.data.get('error') or ''))
+    STORE.finish_job(h.require('event')['event'], str(h.data.get('id', '')), str(h.data.get('error') or '')[:300])
     return {'message': 'Registado.'}
 
 
 @route('POST', '/api/import')
 def api_import(h):
-    count, skipped = import_people(h.require('event')['event_id'], h.body, h.filename)
+    count, skipped = import_people(h.require('event')['event'], h.body, h.param('filename'))
     return {'message': f'{count} participantes importados. {skipped} ignorados (duplicados ou inválidos).'}
 
 
 @route('POST', '/api/replace')
 def api_replace(h):
     old_count, count, skipped, backup = replace_people(
-        h.require('event')['event_id'], h.body, h.filename, h.headers.get('X-Admin-Password', ''))
+        h.require('event')['event'], h.body, h.param('filename'), h.headers.get('X-Admin-Password', ''))
     return {'message': f'Lista substituída: {old_count} anteriores removidos; {count} participantes importados; '
-                       f'{skipped} linhas ignoradas. Cópia de segurança: copias_seguranca/{backup}.'}
+                       f'{skipped} linhas ignoradas. Cópia de segurança: {backup}.'}
 
 
 PASSWORD_ROUTES = {'/api/setup-admin', '/api/login-admin', '/api/login-event', '/api/replace'}
@@ -797,15 +652,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(payload, cookie=cookie)
         except PermissionError as exc:
             if guarded:
-                note_failure(self.client_ip)
+                STORE.note_failure(self.client_ip)
             self.send_json({'error': str(exc)}, 403)
+        except AlreadyCheckedIn as exc:
+            self.send_json({'error': str(exc)}, 409)
         except Exception as exc:
             self.send_json({'error': str(exc)}, 400)
 
     def read_body(self):
         # Apenas escritas da própria página (mesma origem), incluindo ficheiros importados.
         origin = self.headers.get('Origin', '')
-        if origin and origin not in ORIGINS:
+        same_host = PUBLIC_URL and urlparse(origin).netloc == self.headers.get('Host', '')
+        if origin and origin not in (LOCAL_ORIGIN, PUBLIC_URL) and not same_host:
             raise PermissionError('Origem não autorizada.')
         length = int(self.headers.get('Content-Length', '0'))
         if length < 0 or length > MAX_UPLOAD:
@@ -820,26 +678,27 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError('Pedido inválido.') from None
         return data if isinstance(data, dict) else {}
 
+    def param(self, name):
+        return self.query.get(name, [''])[0]
+
     @property
     def client_ip(self):
-        # Atrás do Cloudflare Tunnel todas as ligações chegam de 127.0.0.1.
-        return (TRUST_PROXY and self.headers.get('CF-Connecting-IP')) or self.client_address[0]
+        if TRUST_PROXY == 'cloudflare':
+            ip = self.headers.get('CF-Connecting-IP')
+        elif TRUST_PROXY == 'google':
+            # O Google acrescenta o IP real no fim de X-Forwarded-For; o início pode vir do cliente.
+            ip = self.headers.get('X-Forwarded-For', '').split(',')[-1].strip()
+        else:
+            ip = None
+        return ip or self.client_address[0]
 
     @property
-    def filename(self):
-        return self.query.get('filename', [''])[0]
-
-    @property
-    def token(self):
+    def session(self):
         try:
             morsel = SimpleCookie(self.headers.get('Cookie', '')).get(SESSION_COOKIE)
         except CookieError:
             return None
-        return morsel.value if morsel else None
-
-    @property
-    def session(self):
-        return get_session(self.token)
+        return read_session(morsel.value) if morsel else None
 
     def require(self, kind):
         sess = self.session
@@ -872,7 +731,6 @@ class Handler(BaseHTTPRequestHandler):
 
 def prompt_admin_password():
     """Definir ou repor a palavra-passe de administração a partir do terminal."""
-    init_db()
     password = getpass.getpass('Nova palavra-passe de administração: ')
     if password != getpass.getpass('Confirmar: '):
         raise SystemExit('As palavras-passe não coincidem.')
@@ -884,17 +742,15 @@ def prompt_admin_password():
 
 
 def main():
+    open_store()
     if '--definir-admin' in sys.argv[1:]:
         return prompt_admin_password()
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    init_db()
     try:
         server = ThreadingHTTPServer((HOST, PORT), Handler)
     except OSError as exc:
         raise SystemExit(f'Não foi possível iniciar a porta {PORT}. Fecha a versão anterior com Control+C. ({exc})')
     url = f'http://{HOST}:{PORT}/'
-    print(f'marcAsério | Check-in: {PUBLIC_URL or url} (impressão: {PRINT_MODE})', flush=True)
-    print(f'Base de dados: {DB_PATH}', flush=True)
+    print(f'marcAsério | Check-in: {PUBLIC_URL or url} (dados: {STORE_KIND}, impressão: {PRINT_MODE})', flush=True)
     if OPEN_BROWSER:
         print('Para terminar: Control+C')
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
